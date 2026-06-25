@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 import json
+import re
+import shutil
+import textwrap
+import unicodedata
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
@@ -9,6 +13,17 @@ from typing import Iterable, Protocol
 
 
 STOP_COMMANDS = {"/quit", "/exit"}
+
+TERMINAL_ESCAPE_RE = re.compile(
+    r"\x1b(?:"
+    r"\][^\x07\x1b]*(?:\x07|\x1b\\)?"  # OSC: set title, clipboard, hyperlinks, etc.
+    r"|P.*?(?:\x1b\\)?"  # DCS.
+    r"|\[[0-?]*[ -/]*[@-~]"  # CSI: SGR, cursor movement, erase, etc.
+    r"|[@-_]"  # Other 7-bit C1 controls.
+    r")",
+    re.DOTALL,
+)
+RAW_CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
 
 
 class CompletionClient(Protocol):
@@ -34,10 +49,66 @@ def is_stop_command(text: str) -> bool:
     return text.strip() in STOP_COMMANDS
 
 
-def format_assistant_output(text: str) -> str:
+def sanitize_terminal_text(text: str) -> str:
+    text = TERMINAL_ESCAPE_RE.sub("", text)
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    return RAW_CONTROL_RE.sub("", text)
+
+
+def sanitize_user_input(text: str) -> str:
+    return sanitize_terminal_text(text)
+
+
+def make_terminal_unicode_safe(text: str) -> str:
+    safe_chars: list[str] = []
+    for char in text:
+        if char in {"\n", "\t"}:
+            safe_chars.append(char)
+            continue
+
+        codepoint = ord(char)
+        category = unicodedata.category(char)
+        if category.startswith("C"):
+            continue
+        if codepoint > 0xFFFF:
+            safe_chars.append(f"\\U{codepoint:08x}")
+            continue
+        safe_chars.append(char)
+    return "".join(safe_chars)
+
+
+def terminal_wrap_width() -> int:
+    columns = shutil.get_terminal_size(fallback=(100, 24)).columns
+    return max(40, min(columns, 120))
+
+
+def wrap_terminal_text(text: str, *, width: int | None = None) -> str:
+    wrap_width = terminal_wrap_width() if width is None else width
+    wrapped_lines: list[str] = []
+    for line in text.split("\n"):
+        if len(line) <= wrap_width:
+            wrapped_lines.append(line)
+            continue
+        wrapped_lines.extend(
+            textwrap.wrap(
+                line,
+                width=wrap_width,
+                break_long_words=True,
+                break_on_hyphens=False,
+                replace_whitespace=False,
+                drop_whitespace=False,
+            )
+        )
+    return "\n".join(wrapped_lines)
+
+
+def format_assistant_output(text: str, *, width: int | None = None) -> str:
     display_text = text
     if "\n" not in display_text:
         display_text = display_text.replace("\\r\\n", "\n").replace("\\n", "\n")
+    display_text = sanitize_terminal_text(display_text)
+    display_text = make_terminal_unicode_safe(display_text)
+    display_text = wrap_terminal_text(display_text, width=width)
     return f"LLM>\n{display_text}"
 
 

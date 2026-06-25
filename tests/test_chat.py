@@ -7,6 +7,10 @@ from local_llm_chat.chat import (
     OpenAICompletionClient,
     format_assistant_output,
     is_stop_command,
+    make_terminal_unicode_safe,
+    sanitize_user_input,
+    sanitize_terminal_text,
+    wrap_terminal_text,
 )
 
 
@@ -65,6 +69,72 @@ class ChatSessionTests(unittest.TestCase):
         self.assertEqual(
             format_assistant_output("first\\nsecond\\nthird"),
             "LLM>\nfirst\nsecond\nthird",
+        )
+
+    def test_format_assistant_output_removes_ansi_control_sequences(self):
+        self.assertEqual(
+            format_assistant_output("\x1b[31mred\x1b[0m plain"),
+            "LLM>\nred plain",
+        )
+
+    def test_sanitize_terminal_text_removes_osc_sequences(self):
+        self.assertEqual(
+            sanitize_terminal_text("before\x1b]0;bad title\x07after"),
+            "beforeafter",
+        )
+
+    def test_sanitize_terminal_text_removes_raw_control_chars(self):
+        self.assertEqual(
+            sanitize_terminal_text("a\x00b\x08c\r\nd\re\tf"),
+            "abc\nd\ne\tf",
+        )
+
+    def test_sanitize_user_input_removes_terminal_controls_before_prompt(self):
+        self.assertEqual(
+            sanitize_user_input("hello\x1b[2J world\x00"),
+            "hello world",
+        )
+
+    def test_make_terminal_unicode_safe_keeps_japanese_text(self):
+        self.assertEqual(
+            make_terminal_unicode_safe("日本語 カタカナ ひらがな"),
+            "日本語 カタカナ ひらがな",
+        )
+
+    def test_make_terminal_unicode_safe_removes_format_controls(self):
+        self.assertEqual(
+            make_terminal_unicode_safe("a\u200db\u202ec"),
+            "abc",
+        )
+
+    def test_make_terminal_unicode_safe_escapes_non_bmp_chars(self):
+        self.assertEqual(
+            make_terminal_unicode_safe("ok \U0001f600"),
+            "ok \\U0001f600",
+        )
+
+    def test_format_assistant_output_makes_unicode_safe_for_display(self):
+        self.assertEqual(
+            format_assistant_output("ok \U0001f600"),
+            "LLM>\nok \\U0001f600",
+        )
+
+    def test_wrap_terminal_text_wraps_long_lines(self):
+        self.assertEqual(
+            wrap_terminal_text("abcdefghij", width=4),
+            "abcd\nefgh\nij",
+        )
+
+    def test_wrap_terminal_text_preserves_existing_line_breaks(self):
+        self.assertEqual(
+            wrap_terminal_text("abcde\nfghij", width=3),
+            "abc\nde\nfgh\nij",
+        )
+
+    def test_format_assistant_output_wraps_long_lines(self):
+        self.assertEqual(
+            format_assistant_output("abcdefghij", width=4),
+            "LLM>\nabcd\nefgh\nij",
         )
 
 

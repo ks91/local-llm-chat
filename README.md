@@ -43,8 +43,28 @@ You will see a prompt like this:
 You>
 ```
 
+Input uses the terminal's normal line editing. Backspace edits the current line
+before Python receives it. Optional `readline`/libedit history and cursor
+bindings can be enabled with `--line-editing`, but they are off by default to
+keep terminal interaction conservative. Chat input history is not saved after
+the process exits.
+
 Assistant responses are printed under an `LLM>` label. Multi-line responses are
-displayed across multiple terminal lines.
+displayed across multiple terminal lines. Long lines are wrapped before display
+to avoid stressing terminal rendering with very wide generated lines.
+
+Terminal control sequences in model output, such as ANSI color codes, OSC title
+changes, cursor movement, and raw control characters, are removed before display.
+This keeps generated text from changing terminal state or triggering terminal
+rendering bugs.
+
+For Apple Terminal stability, display output also removes invisible Unicode
+format/control characters and escapes non-BMP Unicode such as many emoji as
+literal `\U00000000`-style text. Common Japanese text remains unchanged.
+
+User input is also sanitized before it is added to the in-memory conversation
+history, so pasted terminal control sequences are not sent back to the model in
+later prompts.
 
 ## Initial Instructions
 
@@ -91,7 +111,8 @@ python3 -m local_llm_chat \
   --model local \
   --max-tokens 512 \
   --temperature 0.7 \
-  --timeout 120
+  --timeout 120 \
+  --line-editing
 ```
 
 Options:
@@ -100,6 +121,8 @@ Options:
 - `--max-tokens`: maximum tokens requested for each assistant response. Default: `512`
 - `--temperature`: sampling temperature. Default: `0.7`
 - `--timeout`: HTTP request timeout in seconds. Default: `120`
+- `--line-editing`: enable optional in-process readline/libedit input history
+  and cursor bindings. Default: off
 
 The default stop sequence is `\nUser:` so the server should stop before
 generating the next user turn.

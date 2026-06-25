@@ -10,7 +10,11 @@ from .chat import (
     format_assistant_output,
     is_stop_command,
     load_instructions,
+    sanitize_user_input,
 )
+
+
+_READLINE_AUTO = object()
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -24,6 +28,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-tokens", type=int, default=512)
     parser.add_argument("--temperature", type=float, default=0.7)
     parser.add_argument("--timeout", type=int, default=120)
+    parser.add_argument(
+        "--line-editing",
+        action="store_true",
+        help="enable readline/libedit history and cursor bindings",
+    )
     return parser
 
 
@@ -33,8 +42,26 @@ def resolve_base_url(*, port: int, base_url: str | None) -> str:
     return f"http://127.0.0.1:{port}"
 
 
+def configure_line_editing(readline_module=_READLINE_AUTO, *, enabled: bool = False) -> bool:
+    if not enabled:
+        return False
+    if readline_module is _READLINE_AUTO:
+        try:
+            import readline as readline_module
+        except ImportError:
+            return False
+    if readline_module is None:
+        return False
+
+    readline_module.parse_and_bind("set editing-mode emacs")
+    readline_module.parse_and_bind("tab: complete")
+    readline_module.set_history_length(200)
+    return True
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    configure_line_editing(enabled=args.line_editing)
     instructions = load_instructions(Path(args.instructions))
     base_url = resolve_base_url(port=args.port, base_url=args.base_url)
     client = OpenAICompletionClient(base_url, model=args.model, timeout=args.timeout)
@@ -61,6 +88,7 @@ def main(argv: list[str] | None = None) -> int:
             print("\nInterrupted. Bye.")
             return 130
 
+        user_text = sanitize_user_input(user_text)
         if not user_text.strip():
             continue
         if is_stop_command(user_text):
