@@ -17,7 +17,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Chat with a local OpenAI-compatible completion server."
     )
-    parser.add_argument("--base-url", default="http://127.0.0.1:8080")
+    parser.add_argument("--port", type=int, default=8080)
+    parser.add_argument("--base-url")
     parser.add_argument("--instructions", default="instructions.md")
     parser.add_argument("--model", default="local")
     parser.add_argument("--max-tokens", type=int, default=512)
@@ -26,10 +27,17 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def resolve_base_url(*, port: int, base_url: str | None) -> str:
+    if base_url:
+        return base_url
+    return f"http://127.0.0.1:{port}"
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     instructions = load_instructions(Path(args.instructions))
-    client = OpenAICompletionClient(args.base_url, model=args.model, timeout=args.timeout)
+    base_url = resolve_base_url(port=args.port, base_url=args.base_url)
+    client = OpenAICompletionClient(base_url, model=args.model, timeout=args.timeout)
     session = ChatSession(
         instructions=instructions,
         client=client,
