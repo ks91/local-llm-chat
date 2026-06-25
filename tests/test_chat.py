@@ -4,12 +4,15 @@ from unittest.mock import patch
 
 from local_llm_chat.chat import (
     ChatSession,
+    DEFAULT_MAX_TOKENS,
     OpenAICompletionClient,
     format_assistant_output,
     is_stop_command,
     make_terminal_unicode_safe,
+    render_unicode_escapes,
     sanitize_user_input,
     sanitize_terminal_text,
+    strip_thinking,
     wrap_terminal_text,
 )
 
@@ -53,16 +56,56 @@ class ChatSessionTests(unittest.TestCase):
         self.assertEqual(second, "second answer")
         self.assertIn("User: one\nAssistant: hello", client.calls[1]["prompt"])
         self.assertIn("User: two\nAssistant:", client.calls[1]["prompt"])
+        self.assertEqual(client.calls[0]["max_tokens"], DEFAULT_MAX_TOKENS)
+
+    def test_ask_strips_thinking_from_history_by_default(self):
+        client = FakeClient(["<think>private</think>\nfinal"])
+        session = ChatSession(client=client)
+
+        self.assertEqual(session.ask("one"), "final")
+        self.assertEqual(session.turns, [("one", "final")])
+
+    def test_ask_can_preserve_thinking_when_enabled(self):
+        client = FakeClient(["<think>private</think>\nfinal"])
+        session = ChatSession(client=client, show_thinking=True)
+
+        self.assertEqual(session.ask("one"), "<think>private</think>\nfinal")
+        self.assertEqual(session.turns, [("one", "<think>private</think>\nfinal")])
 
     def test_stop_commands(self):
         self.assertTrue(is_stop_command("/quit"))
         self.assertTrue(is_stop_command(" /exit "))
+        self.assertTrue(is_stop_command("/bye"))
         self.assertFalse(is_stop_command("quit"))
 
     def test_format_assistant_output_preserves_real_newlines(self):
         self.assertEqual(
             format_assistant_output("first\nsecond\nthird"),
             "LLM>\nfirst\nsecond\nthird",
+        )
+
+    def test_strip_thinking_removes_standard_think_block(self):
+        self.assertEqual(
+            strip_thinking("<think>\nprivate\n</think>\nanswer"),
+            "answer",
+        )
+
+    def test_strip_thinking_removes_self_closing_think_tag(self):
+        self.assertEqual(strip_thinking("<think/>\nanswer"), "answer")
+
+    def test_strip_thinking_handles_case_insensitive_tags(self):
+        self.assertEqual(strip_thinking("<THINK>private</Think>\nanswer"), "answer")
+
+    def test_format_assistant_output_hides_thinking_by_default(self):
+        self.assertEqual(
+            format_assistant_output("<think>private</think>\nanswer"),
+            "LLM>\nanswer",
+        )
+
+    def test_format_assistant_output_can_show_thinking(self):
+        self.assertEqual(
+            format_assistant_output("<think>private</think>\nanswer", show_thinking=True),
+            "LLM>\n<think>private</think>\nanswer",
         )
 
     def test_format_assistant_output_expands_escaped_newlines_for_display(self):
@@ -113,10 +156,34 @@ class ChatSessionTests(unittest.TestCase):
             "ok \\U0001f600",
         )
 
+    def test_make_terminal_unicode_safe_can_keep_non_bmp_chars(self):
+        self.assertEqual(
+            make_terminal_unicode_safe("ok \U0001f9e9", allow_non_bmp=True),
+            "ok \U0001f9e9",
+        )
+
     def test_format_assistant_output_makes_unicode_safe_for_display(self):
         self.assertEqual(
             format_assistant_output("ok \U0001f600"),
             "LLM>\nok \\U0001f600",
+        )
+
+    def test_render_unicode_escapes_turns_qwen_style_emoji_into_text(self):
+        self.assertEqual(render_unicode_escapes("piece \\U0001f9e9"), "piece \U0001f9e9")
+
+    def test_render_unicode_escapes_ignores_invalid_codepoints(self):
+        self.assertEqual(render_unicode_escapes("bad \\Uffffffff"), "bad \\Uffffffff")
+
+    def test_format_assistant_output_can_show_qwen_style_emoji(self):
+        self.assertEqual(
+            format_assistant_output("piece \\U0001f9e9", show_emoji=True),
+            "LLM>\npiece \U0001f9e9",
+        )
+
+    def test_format_assistant_output_keeps_qwen_style_emoji_escaped_by_default(self):
+        self.assertEqual(
+            format_assistant_output("piece \\U0001f9e9"),
+            "LLM>\npiece \\U0001f9e9",
         )
 
     def test_wrap_terminal_text_wraps_long_lines(self):

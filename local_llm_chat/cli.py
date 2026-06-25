@@ -6,6 +6,7 @@ from pathlib import Path
 
 from .chat import (
     ChatSession,
+    DEFAULT_MAX_TOKENS,
     OpenAICompletionClient,
     format_assistant_output,
     is_stop_command,
@@ -25,13 +26,23 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--base-url")
     parser.add_argument("--instructions", default="instructions.md")
     parser.add_argument("--model", default="local")
-    parser.add_argument("--max-tokens", type=int, default=512)
+    parser.add_argument("--max-tokens", type=int, default=DEFAULT_MAX_TOKENS)
     parser.add_argument("--temperature", type=float, default=0.7)
     parser.add_argument("--timeout", type=int, default=120)
     parser.add_argument(
         "--line-editing",
         action="store_true",
         help="enable readline/libedit history and cursor bindings",
+    )
+    parser.add_argument(
+        "--show-thinking",
+        action="store_true",
+        help="show model thinking tags such as <think>...</think>",
+    )
+    parser.add_argument(
+        "--show-emoji",
+        action="store_true",
+        help="render non-BMP Unicode and \\U00000000-style emoji escapes",
     )
     return parser
 
@@ -70,9 +81,10 @@ def main(argv: list[str] | None = None) -> int:
         client=client,
         max_tokens=args.max_tokens,
         temperature=args.temperature,
+        show_thinking=args.show_thinking,
     )
 
-    print("Local LLM chat. Type /quit or /exit to stop gracefully.")
+    print("Local LLM chat. Type /bye, /quit, or /exit to stop gracefully.")
     if instructions:
         print(f"Loaded instructions from {args.instructions}.")
     else:
@@ -102,7 +114,13 @@ def main(argv: list[str] | None = None) -> int:
             return 1
 
         print()
-        print(format_assistant_output(answer))
+        print(
+            format_assistant_output(
+                answer,
+                show_thinking=args.show_thinking,
+                show_emoji=args.show_emoji,
+            )
+        )
 
 
 if __name__ == "__main__":

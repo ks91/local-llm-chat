@@ -12,7 +12,8 @@ from pathlib import Path
 from typing import Iterable, Protocol
 
 
-STOP_COMMANDS = {"/quit", "/exit"}
+STOP_COMMANDS = {"/bye", "/exit", "/quit"}
+DEFAULT_MAX_TOKENS = 2048
 
 TERMINAL_ESCAPE_RE = re.compile(
     r"\x1b(?:"
@@ -24,6 +25,9 @@ TERMINAL_ESCAPE_RE = re.compile(
     re.DOTALL,
 )
 RAW_CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
+THINKING_RE = re.compile(r"<think\b[^>]*>.*?</think\s*>", re.IGNORECASE | re.DOTALL)
+SELF_CLOSING_THINK_RE = re.compile(r"<think\s*/\s*>", re.IGNORECASE)
+UNICODE_ESCAPE_RE = re.compile(r"\\U([0-9a-fA-F]{8})|\\u([0-9a-fA-F]{4})")
 
 
 class CompletionClient(Protocol):
@@ -59,7 +63,24 @@ def sanitize_user_input(text: str) -> str:
     return sanitize_terminal_text(text)
 
 
-def make_terminal_unicode_safe(text: str) -> str:
+def strip_thinking(text: str) -> str:
+    text = THINKING_RE.sub("", text)
+    text = SELF_CLOSING_THINK_RE.sub("", text)
+    return text.strip()
+
+
+def render_unicode_escapes(text: str) -> str:
+    def replace_match(match: re.Match[str]) -> str:
+        hex_value = match.group(1) or match.group(2)
+        try:
+            return chr(int(hex_value, 16))
+        except (OverflowError, ValueError):
+            return match.group(0)
+
+    return UNICODE_ESCAPE_RE.sub(replace_match, text)
+
+
+def make_terminal_unicode_safe(text: str, *, allow_non_bmp: bool = False) -> str:
     safe_chars: list[str] = []
     for char in text:
         if char in {"\n", "\t"}:
@@ -70,7 +91,7 @@ def make_terminal_unicode_safe(text: str) -> str:
         category = unicodedata.category(char)
         if category.startswith("C"):
             continue
-        if codepoint > 0xFFFF:
+        if codepoint > 0xFFFF and not allow_non_bmp:
             safe_chars.append(f"\\U{codepoint:08x}")
             continue
         safe_chars.append(char)
@@ -102,12 +123,22 @@ def wrap_terminal_text(text: str, *, width: int | None = None) -> str:
     return "\n".join(wrapped_lines)
 
 
-def format_assistant_output(text: str, *, width: int | None = None) -> str:
+def format_assistant_output(
+    text: str,
+    *,
+    width: int | None = None,
+    show_thinking: bool = False,
+    show_emoji: bool = False,
+) -> str:
     display_text = text
+    if not show_thinking:
+        display_text = strip_thinking(display_text)
+    if show_emoji:
+        display_text = render_unicode_escapes(display_text)
     if "\n" not in display_text:
         display_text = display_text.replace("\\r\\n", "\n").replace("\\n", "\n")
     display_text = sanitize_terminal_text(display_text)
-    display_text = make_terminal_unicode_safe(display_text)
+    display_text = make_terminal_unicode_safe(display_text, allow_non_bmp=show_emoji)
     display_text = wrap_terminal_text(display_text, width=width)
     return f"LLM>\n{display_text}"
 
@@ -164,8 +195,9 @@ class OpenAICompletionClient:
 class ChatSession:
     instructions: str = ""
     client: CompletionClient | None = None
-    max_tokens: int = 512
+    max_tokens: int = DEFAULT_MAX_TOKENS
     temperature: float = 0.7
+    show_thinking: bool = False
     stop: list[str] = field(default_factory=lambda: ["\nUser:"])
     turns: list[tuple[str, str]] = field(default_factory=list)
 
@@ -192,6 +224,8 @@ class ChatSession:
             temperature=self.temperature,
             stop=self.stop,
         )
+        if not self.show_thinking:
+            answer = strip_thinking(answer)
         self.add_turn(user_text, answer)
         return answer
 

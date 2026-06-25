@@ -62,6 +62,15 @@ For Apple Terminal stability, display output also removes invisible Unicode
 format/control characters and escapes non-BMP Unicode such as many emoji as
 literal `\U00000000`-style text. Common Japanese text remains unchanged.
 
+If your terminal handles emoji reliably, enable emoji rendering:
+
+```sh
+python3 -m local_llm_chat --show-emoji
+```
+
+This also converts model output such as `\U0001f9e9` into the corresponding
+emoji for display.
+
 User input is also sanitized before it is added to the in-memory conversation
 history, so pasted terminal control sequences are not sent back to the model in
 later prompts.
@@ -109,29 +118,58 @@ The client sends these completion parameters:
 ```sh
 python3 -m local_llm_chat \
   --model local \
-  --max-tokens 512 \
+  --max-tokens 2048 \
   --temperature 0.7 \
   --timeout 120 \
-  --line-editing
+  --line-editing \
+  --show-thinking \
+  --show-emoji
 ```
 
 Options:
 
 - `--model`: model name sent in the JSON payload. Default: `local`
-- `--max-tokens`: maximum tokens requested for each assistant response. Default: `512`
+- `--max-tokens`: maximum tokens requested for each assistant response. Default: `2048`
 - `--temperature`: sampling temperature. Default: `0.7`
 - `--timeout`: HTTP request timeout in seconds. Default: `120`
 - `--line-editing`: enable optional in-process readline/libedit input history
   and cursor bindings. Default: off
+- `--show-thinking`: show model thinking tags such as `<think>...</think>`.
+  Default: off
+- `--show-emoji`: render non-BMP Unicode and `\U00000000`-style emoji escapes
+  such as `\U0001f9e9`. Default: off
+
+## Thinking Tags
+
+Some models, including Qwen-style reasoning models, may return thinking markup
+such as:
+
+```text
+<think>
+private reasoning
+</think>
+final answer
+```
+
+By default, `<think>...</think>` blocks and self-closing `<think/>` tags are
+removed before the response is displayed or saved in the in-memory conversation
+history. This keeps future prompts focused on the visible answer.
+
+To show and preserve those tags during the current session:
+
+```sh
+python3 -m local_llm_chat --show-thinking
+```
 
 The default stop sequence is `\nUser:` so the server should stop before
 generating the next user turn.
 
 ## Stop Gracefully
 
-Inside the chat prompt, type either command:
+Inside the chat prompt, type any of these commands:
 
 ```text
+/bye
 /quit
 /exit
 ```
@@ -155,7 +193,7 @@ Payload fields:
 {
   "model": "local",
   "prompt": "...",
-  "max_tokens": 512,
+  "max_tokens": 2048,
   "temperature": 0.7,
   "stop": ["\nUser:"]
 }
