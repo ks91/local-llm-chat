@@ -12,6 +12,7 @@ from local_llm_chat.chat import (
     render_unicode_escapes,
     sanitize_user_input,
     sanitize_terminal_text,
+    strip_restarted_prompt,
     strip_thinking,
     wrap_terminal_text,
 )
@@ -65,6 +66,22 @@ class ChatSessionTests(unittest.TestCase):
         self.assertEqual(session.ask("one"), "final")
         self.assertEqual(session.turns, [("one", "final")])
 
+    def test_ask_strips_restarted_system_instructions_from_history(self):
+        client = FakeClient(["final answer\n\nSystem instructions:\nDo not leak."])
+        session = ChatSession(client=client)
+
+        self.assertEqual(session.ask("one"), "final answer")
+        self.assertEqual(session.turns, [("one", "final answer")])
+
+    def test_default_stop_sequences_include_prompt_restart_labels(self):
+        client = FakeClient(["hello"])
+        session = ChatSession(client=client)
+
+        session.ask("one")
+
+        self.assertIn("\nUser:", client.calls[0]["stop"])
+        self.assertIn("\nSystem instructions:", client.calls[0]["stop"])
+
     def test_ask_can_preserve_thinking_when_enabled(self):
         client = FakeClient(["<think>private</think>\nfinal"])
         session = ChatSession(client=client, show_thinking=True)
@@ -95,6 +112,61 @@ class ChatSessionTests(unittest.TestCase):
 
     def test_strip_thinking_handles_case_insensitive_tags(self):
         self.assertEqual(strip_thinking("<THINK>private</Think>\nanswer"), "answer")
+
+    def test_strip_restarted_prompt_removes_system_instructions_suffix(self):
+        self.assertEqual(
+            strip_restarted_prompt("answer\n\nSystem instructions:\nBe terse."),
+            "answer",
+        )
+
+    def test_strip_restarted_prompt_removes_japanese_answer_suffix(self):
+        text = (
+            "ありがとうございます。私もより良いアシスタントになるために、"
+            "引き続き改善に努めます。何かお手伝いできることがあれば、"
+            "何でもお気軽にお問い合わせください。 \n"
+            "System instructions:\n"
+            "You are a concise, practical assistant.\n\n"
+            "Answer in the same language as the user unless asked otherwise."
+        )
+
+        self.assertEqual(
+            strip_restarted_prompt(text),
+            "ありがとうございます。私もより良いアシスタントになるために、"
+            "引き続き改善に努めます。何かお手伝いできることがあれば、"
+            "何でもお気軽にお問い合わせください。",
+        )
+
+    def test_strip_restarted_prompt_removes_wrapped_system_instructions_suffix(self):
+        text = (
+            "メタ認知はまた、問題解決や意思決定にも関与します。これは、"
+            "あなたが自分の思考プロセスを監視し、必要に応じて修正することを"
+            "可能にします。 System \n"
+            "instructions:\n"
+            "You are a concise, practical assistant.\n\n"
+            "Answer in the same language as the user unless asked otherwise."
+        )
+
+        self.assertEqual(
+            strip_restarted_prompt(text),
+            "メタ認知はまた、問題解決や意思決定にも関与します。これは、"
+            "あなたが自分の思考プロセスを監視し、必要に応じて修正することを"
+            "可能にします。",
+        )
+
+    def test_strip_restarted_prompt_removes_user_suffix(self):
+        self.assertEqual(strip_restarted_prompt("answer\nUser: next"), "answer")
+
+    def test_strip_restarted_prompt_keeps_inline_mentions(self):
+        self.assertEqual(
+            strip_restarted_prompt("The phrase System instructions: is shown inline."),
+            "The phrase System instructions: is shown inline.",
+        )
+
+    def test_format_assistant_output_strips_restarted_prompt_before_display(self):
+        self.assertEqual(
+            format_assistant_output("answer\nSystem instructions:\nsecret"),
+            "LLM>\nanswer",
+        )
 
     def test_format_assistant_output_hides_thinking_by_default(self):
         self.assertEqual(
@@ -245,6 +317,24 @@ class OpenAICompletionClientTests(unittest.TestCase):
         self.assertEqual(captured["body"]["temperature"], 0.2)
         self.assertEqual(captured["body"]["stop"], ["\nUser:"])
         self.assertEqual(captured["headers"]["Content-type"], "application/json")
+
+    def test_complete_wraps_timeout_error(self):
+        def fake_urlopen(request, timeout):
+            raise TimeoutError("timed out")
+
+        client = OpenAICompletionClient("http://127.0.0.1:8080", timeout=3)
+
+        with patch("urllib.request.urlopen", fake_urlopen):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "LLM server request timed out after 3 seconds",
+            ):
+                client.complete(
+                    "User: hi\nAssistant:",
+                    max_tokens=64,
+                    temperature=0.2,
+                    stop=["\nUser:"],
+                )
 
 
 if __name__ == "__main__":

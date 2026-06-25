@@ -14,6 +14,7 @@ from typing import Iterable, Protocol
 
 STOP_COMMANDS = {"/bye", "/exit", "/quit"}
 DEFAULT_MAX_TOKENS = 2048
+DEFAULT_STOP_SEQUENCES = ["\nUser:", "\nSystem instructions:"]
 
 TERMINAL_ESCAPE_RE = re.compile(
     r"\x1b(?:"
@@ -28,6 +29,7 @@ RAW_CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
 THINKING_RE = re.compile(r"<think\b[^>]*>.*?</think\s*>", re.IGNORECASE | re.DOTALL)
 SELF_CLOSING_THINK_RE = re.compile(r"<think\s*/\s*>", re.IGNORECASE)
 UNICODE_ESCAPE_RE = re.compile(r"\\U([0-9a-fA-F]{8})|\\u([0-9a-fA-F]{4})")
+RESTARTED_SYSTEM_LABEL_RE = re.compile(r"(?is)(^|\s)(system\s+instructions\s*:)")
 
 
 class CompletionClient(Protocol):
@@ -67,6 +69,24 @@ def strip_thinking(text: str) -> str:
     text = THINKING_RE.sub("", text)
     text = SELF_CLOSING_THINK_RE.sub("", text)
     return text.strip()
+
+
+def strip_restarted_prompt(text: str) -> str:
+    for system_match in RESTARTED_SYSTEM_LABEL_RE.finditer(text):
+        label_start = system_match.start(2)
+        line_start = text.rfind("\n", 0, label_start) + 1
+        line_prefix = text[line_start:label_start]
+        label_text = system_match.group(2)
+        if not line_prefix.strip() or "\n" in label_text:
+            return text[: system_match.start()].strip()
+
+    kept_lines: list[str] = []
+    for line in text.splitlines():
+        normalized = line.strip().casefold()
+        if normalized.startswith("user:"):
+            break
+        kept_lines.append(line)
+    return "\n".join(kept_lines).strip()
 
 
 def render_unicode_escapes(text: str) -> str:
@@ -133,6 +153,7 @@ def format_assistant_output(
     display_text = text
     if not show_thinking:
         display_text = strip_thinking(display_text)
+    display_text = strip_restarted_prompt(display_text)
     if show_emoji:
         display_text = render_unicode_escapes(display_text)
     if "\n" not in display_text:
@@ -174,6 +195,10 @@ class OpenAICompletionClient:
         try:
             with urllib.request.urlopen(request, timeout=self.timeout) as response:
                 body = json.loads(response.read().decode("utf-8"))
+        except TimeoutError as exc:
+            raise RuntimeError(
+                f"LLM server request timed out after {self.timeout} seconds"
+            ) from exc
         except urllib.error.URLError as exc:
             raise RuntimeError(f"LLM server request failed: {exc}") from exc
         except json.JSONDecodeError as exc:
@@ -198,7 +223,7 @@ class ChatSession:
     max_tokens: int = DEFAULT_MAX_TOKENS
     temperature: float = 0.7
     show_thinking: bool = False
-    stop: list[str] = field(default_factory=lambda: ["\nUser:"])
+    stop: list[str] = field(default_factory=lambda: list(DEFAULT_STOP_SEQUENCES))
     turns: list[tuple[str, str]] = field(default_factory=list)
 
     def add_turn(self, user_text: str, assistant_text: str) -> None:
@@ -226,6 +251,7 @@ class ChatSession:
         )
         if not self.show_thinking:
             answer = strip_thinking(answer)
+        answer = strip_restarted_prompt(answer)
         self.add_turn(user_text, answer)
         return answer
 

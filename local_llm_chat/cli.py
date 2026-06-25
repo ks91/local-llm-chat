@@ -111,7 +111,8 @@ def main(argv: list[str] | None = None) -> int:
             answer = session.ask(user_text)
         except RuntimeError as exc:
             print(f"Error: {exc}", file=sys.stderr)
-            return 1
+            print("You can retry, use --timeout to wait longer, or type /bye to exit.")
+            continue
 
         print()
         print(

@@ -162,7 +162,19 @@ python3 -m local_llm_chat --show-thinking
 ```
 
 The default stop sequence is `\nUser:` so the server should stop before
-generating the next user turn.
+generating the next user turn. The client also stops on `\nSystem instructions:`
+and removes restarted prompt labels from the tail of a response. This helps with
+completion models that occasionally continue by echoing the prompt scaffold
+instead of stopping after the answer.
+
+If a local model is slow, increase the timeout:
+
+```sh
+python3 -m local_llm_chat --timeout 300
+```
+
+Timeouts and other request errors are printed without a Python traceback, and
+the chat prompt stays open so you can retry or exit with `/bye`.
 
 ## Stop Gracefully
 
