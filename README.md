@@ -49,6 +49,22 @@ bindings can be enabled with `--line-editing`, but they are off by default to
 keep terminal interaction conservative. Chat input history is not saved after
 the process exits.
 
+Very long single-line input may hit the terminal driver's line length limit
+before Python receives it. For long prompts, use multi-line paste mode:
+
+```text
+You> /paste
+Paste multi-line input. Finish with /send or /end on its own line.
+...paste or type text here...
+/send
+```
+
+Or put the prompt in a UTF-8 text file and send it with:
+
+```text
+You> /file path/to/message.txt
+```
+
 Assistant responses are printed under an `LLM>` label. Multi-line responses are
 displayed across multiple terminal lines. Long lines are wrapped before display
 to avoid stressing terminal rendering with very wide generated lines.
@@ -119,6 +135,7 @@ The client sends these completion parameters:
 python3 -m local_llm_chat \
   --model local \
   --max-tokens 2048 \
+  --max-continuations 2 \
   --temperature 0.7 \
   --timeout 120 \
   --line-editing \
@@ -130,6 +147,8 @@ Options:
 
 - `--model`: model name sent in the JSON payload. Default: `local`
 - `--max-tokens`: maximum tokens requested for each assistant response. Default: `2048`
+- `--max-continuations`: additional completion requests when the server reports
+  `finish_reason: length`. Default: `2`
 - `--temperature`: sampling temperature. Default: `0.7`
 - `--timeout`: HTTP request timeout in seconds. Default: `120`
 - `--line-editing`: enable optional in-process readline/libedit input history
@@ -151,9 +170,10 @@ private reasoning
 final answer
 ```
 
-By default, `<think>...</think>` blocks and self-closing `<think/>` tags are
-removed before the response is displayed or saved in the in-memory conversation
-history. This keeps future prompts focused on the visible answer.
+By default, `<think>...</think>` blocks, self-closing `<think/>` tags, and
+truncated unclosed `<think>` blocks are removed before the response is displayed
+or saved in the in-memory conversation history. This keeps future prompts
+focused on the visible answer.
 
 To show and preserve those tags during the current session:
 
@@ -161,11 +181,11 @@ To show and preserve those tags during the current session:
 python3 -m local_llm_chat --show-thinking
 ```
 
-The default stop sequence is `\nUser:` so the server should stop before
-generating the next user turn. The client also stops on `\nSystem instructions:`
-and removes restarted prompt labels from the tail of a response. This helps with
-completion models that occasionally continue by echoing the prompt scaffold
-instead of stopping after the answer.
+The default stop sequences include `\nUser:`, `\nAssistant:`, and
+`\nSystem instructions:` so the server should stop before generating another
+prompt segment. The client also removes restarted prompt labels from the tail of
+a response. This helps with completion models that occasionally continue by
+echoing the prompt scaffold instead of stopping after the answer.
 
 If a local model is slow, increase the timeout:
 

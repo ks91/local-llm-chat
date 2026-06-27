@@ -1,6 +1,15 @@
 import unittest
+import tempfile
+from pathlib import Path
 
-from local_llm_chat.cli import configure_line_editing, resolve_base_url
+from local_llm_chat.cli import (
+    configure_line_editing,
+    is_file_command,
+    is_paste_command,
+    read_message_file,
+    read_paste_input,
+    resolve_base_url,
+)
 
 
 class FakeReadline:
@@ -47,6 +56,58 @@ class CliTests(unittest.TestCase):
 
     def test_configure_line_editing_tolerates_missing_readline(self):
         self.assertFalse(configure_line_editing(None, enabled=True))
+
+    def test_is_paste_command(self):
+        self.assertTrue(is_paste_command(" /paste "))
+        self.assertFalse(is_paste_command("/paste now"))
+
+    def test_read_paste_input_reads_until_send(self):
+        lines = iter(["first", "second", "/send", "ignored"])
+        messages = []
+
+        text = read_paste_input(input_func=lambda: next(lines), print_func=messages.append)
+
+        self.assertEqual(text, "first\nsecond")
+        self.assertEqual(
+            messages,
+            ["Paste multi-line input. Finish with /send or /end on its own line."],
+        )
+
+    def test_read_paste_input_reads_until_end(self):
+        lines = iter(["first", "/end"])
+
+        self.assertEqual(
+            read_paste_input(input_func=lambda: next(lines), print_func=lambda _: None),
+            "first",
+        )
+
+    def test_is_file_command(self):
+        self.assertTrue(is_file_command("/file prompt.txt"))
+        self.assertFalse(is_file_command("/filename prompt.txt"))
+
+    def test_read_message_file_reads_relative_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "message.txt"
+            path.write_text("long\nmessage\n", encoding="utf-8")
+
+            self.assertEqual(
+                read_message_file("/file message.txt", base_dir=Path(tmp)),
+                "long\nmessage\n",
+            )
+
+    def test_read_message_file_supports_quoted_paths(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "long message.txt"
+            path.write_text("hello", encoding="utf-8")
+
+            self.assertEqual(
+                read_message_file('/file "long message.txt"', base_dir=Path(tmp)),
+                "hello",
+            )
+
+    def test_read_message_file_rejects_missing_path(self):
+        with self.assertRaisesRegex(RuntimeError, "Usage: /file"):
+            read_message_file("/file")
 
 
 if __name__ == "__main__":

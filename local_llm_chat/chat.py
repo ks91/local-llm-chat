@@ -14,7 +14,7 @@ from typing import Iterable, Protocol
 
 STOP_COMMANDS = {"/bye", "/exit", "/quit"}
 DEFAULT_MAX_TOKENS = 2048
-DEFAULT_STOP_SEQUENCES = ["\nUser:", "\nSystem instructions:"]
+DEFAULT_STOP_SEQUENCES = ["\nUser:", "\nAssistant:", "\nSystem instructions:"]
 
 TERMINAL_ESCAPE_RE = re.compile(
     r"\x1b(?:"
@@ -28,8 +28,11 @@ TERMINAL_ESCAPE_RE = re.compile(
 RAW_CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
 THINKING_RE = re.compile(r"<think\b[^>]*>.*?</think\s*>", re.IGNORECASE | re.DOTALL)
 SELF_CLOSING_THINK_RE = re.compile(r"<think\s*/\s*>", re.IGNORECASE)
+UNCLOSED_THINKING_RE = re.compile(r"<think\b[^>]*>.*\Z", re.IGNORECASE | re.DOTALL)
 UNICODE_ESCAPE_RE = re.compile(r"\\U([0-9a-fA-F]{8})|\\u([0-9a-fA-F]{4})")
-RESTARTED_SYSTEM_LABEL_RE = re.compile(r"(?is)(^|\s)(system\s+instructions\s*:)")
+RESTARTED_LABEL_RE = re.compile(
+    r"(?is)(^|\s)((?:system\s+instructions|assistant|user)\s*:)"
+)
 
 
 class CompletionClient(Protocol):
@@ -42,6 +45,32 @@ class CompletionClient(Protocol):
         stop: list[str],
     ) -> str:
         ...
+
+
+def client_complete_with_metadata(
+    client: CompletionClient,
+    prompt: str,
+    *,
+    max_tokens: int,
+    temperature: float,
+    stop: list[str],
+) -> dict[str, str | None]:
+    if hasattr(client, "complete_with_metadata"):
+        return client.complete_with_metadata(  # type: ignore[attr-defined]
+            prompt,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            stop=stop,
+        )
+    return {
+        "text": client.complete(
+            prompt,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            stop=stop,
+        ),
+        "finish_reason": None,
+    }
 
 
 def load_instructions(path: str | Path) -> str:
@@ -68,25 +97,20 @@ def sanitize_user_input(text: str) -> str:
 def strip_thinking(text: str) -> str:
     text = THINKING_RE.sub("", text)
     text = SELF_CLOSING_THINK_RE.sub("", text)
+    text = UNCLOSED_THINKING_RE.sub("", text)
     return text.strip()
 
 
 def strip_restarted_prompt(text: str) -> str:
-    for system_match in RESTARTED_SYSTEM_LABEL_RE.finditer(text):
-        label_start = system_match.start(2)
+    for label_match in RESTARTED_LABEL_RE.finditer(text):
+        label_start = label_match.start(2)
         line_start = text.rfind("\n", 0, label_start) + 1
         line_prefix = text[line_start:label_start]
-        label_text = system_match.group(2)
+        label_text = label_match.group(2)
         if not line_prefix.strip() or "\n" in label_text:
-            return text[: system_match.start()].strip()
+            return text[: label_match.start()].strip()
 
-    kept_lines: list[str] = []
-    for line in text.splitlines():
-        normalized = line.strip().casefold()
-        if normalized.startswith("user:"):
-            break
-        kept_lines.append(line)
-    return "\n".join(kept_lines).strip()
+    return text.strip()
 
 
 def render_unicode_escapes(text: str) -> str:
@@ -178,6 +202,21 @@ class OpenAICompletionClient:
         temperature: float,
         stop: list[str],
     ) -> str:
+        return self.complete_with_metadata(
+            prompt,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            stop=stop,
+        )["text"] or ""
+
+    def complete_with_metadata(
+        self,
+        prompt: str,
+        *,
+        max_tokens: int,
+        temperature: float,
+        stop: list[str],
+    ) -> dict[str, str | None]:
         payload = {
             "model": self.model,
             "prompt": prompt,
@@ -210,9 +249,11 @@ class OpenAICompletionClient:
             raise RuntimeError("LLM server response did not include choices") from exc
 
         if "text" in choice:
-            return str(choice["text"]).strip()
+            text = str(choice["text"]).strip()
+            return {"text": text, "finish_reason": choice.get("finish_reason")}
         if "message" in choice and isinstance(choice["message"], dict):
-            return str(choice["message"].get("content", "")).strip()
+            text = str(choice["message"].get("content", "")).strip()
+            return {"text": text, "finish_reason": choice.get("finish_reason")}
         raise RuntimeError("LLM server response choice did not include text")
 
 
@@ -223,6 +264,7 @@ class ChatSession:
     max_tokens: int = DEFAULT_MAX_TOKENS
     temperature: float = 0.7
     show_thinking: bool = False
+    max_continuations: int = 2
     stop: list[str] = field(default_factory=lambda: list(DEFAULT_STOP_SEQUENCES))
     turns: list[tuple[str, str]] = field(default_factory=list)
 
@@ -242,13 +284,24 @@ class ChatSession:
         if self.client is None:
             raise RuntimeError("ChatSession requires a completion client")
 
-        prompt = self.build_prompt(user_text)
-        answer = self.client.complete(
-            prompt,
-            max_tokens=self.max_tokens,
-            temperature=self.temperature,
-            stop=self.stop,
-        )
+        base_prompt = self.build_prompt(user_text)
+        answer = ""
+        finish_reason: str | None = "length"
+        continuations = 0
+
+        while finish_reason == "length" and continuations <= self.max_continuations:
+            prompt = base_prompt + answer
+            result = client_complete_with_metadata(
+                self.client,
+                prompt,
+                max_tokens=self.max_tokens,
+                temperature=self.temperature,
+                stop=self.stop,
+            )
+            answer += result["text"] or ""
+            finish_reason = result["finish_reason"]
+            continuations += 1
+
         if not self.show_thinking:
             answer = strip_thinking(answer)
         answer = strip_restarted_prompt(answer)

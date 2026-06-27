@@ -35,6 +35,23 @@ class FakeClient:
         return self.replies.pop(0)
 
 
+class FakeContinuationClient:
+    def __init__(self, replies):
+        self.replies = list(replies)
+        self.calls = []
+
+    def complete_with_metadata(self, prompt, *, max_tokens, temperature, stop):
+        self.calls.append(
+            {
+                "prompt": prompt,
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+                "stop": stop,
+            }
+        )
+        return self.replies.pop(0)
+
+
 class ChatSessionTests(unittest.TestCase):
     def test_build_prompt_includes_instructions_and_history(self):
         session = ChatSession(instructions="Be concise.")
@@ -80,6 +97,7 @@ class ChatSessionTests(unittest.TestCase):
         session.ask("one")
 
         self.assertIn("\nUser:", client.calls[0]["stop"])
+        self.assertIn("\nAssistant:", client.calls[0]["stop"])
         self.assertIn("\nSystem instructions:", client.calls[0]["stop"])
 
     def test_ask_can_preserve_thinking_when_enabled(self):
@@ -112,6 +130,51 @@ class ChatSessionTests(unittest.TestCase):
 
     def test_strip_thinking_handles_case_insensitive_tags(self):
         self.assertEqual(strip_thinking("<THINK>private</Think>\nanswer"), "answer")
+
+    def test_strip_thinking_removes_unclosed_think_suffix(self):
+        self.assertEqual(strip_thinking("<think>\nlong private reasoning"), "")
+
+    def test_strip_thinking_keeps_text_before_unclosed_think_suffix(self):
+        self.assertEqual(strip_thinking("answer\n<think>\ntruncated"), "answer")
+
+    def test_ask_strips_unclosed_thinking_from_history_by_default(self):
+        client = FakeClient(["<think>long private reasoning"])
+        session = ChatSession(client=client)
+
+        self.assertEqual(session.ask("one"), "")
+        self.assertEqual(session.turns, [("one", "")])
+
+    def test_ask_preserves_unclosed_thinking_when_enabled(self):
+        client = FakeClient(["<think>long private reasoning"])
+        session = ChatSession(client=client, show_thinking=True)
+
+        self.assertEqual(session.ask("one"), "<think>long private reasoning")
+        self.assertEqual(session.turns, [("one", "<think>long private reasoning")])
+
+    def test_ask_continues_when_finish_reason_is_length(self):
+        client = FakeContinuationClient(
+            [
+                {"text": "<think>long", "finish_reason": "length"},
+                {"text": " private</think>\nanswer", "finish_reason": "stop"},
+            ]
+        )
+        session = ChatSession(client=client, max_continuations=2)
+
+        self.assertEqual(session.ask("one"), "answer")
+        self.assertEqual(len(client.calls), 2)
+        self.assertIn("<think>long", client.calls[1]["prompt"])
+
+    def test_ask_stops_after_max_continuations(self):
+        client = FakeContinuationClient(
+            [
+                {"text": "part 1", "finish_reason": "length"},
+                {"text": " part 2", "finish_reason": "length"},
+            ]
+        )
+        session = ChatSession(client=client, max_continuations=1, show_thinking=True)
+
+        self.assertEqual(session.ask("one"), "part 1 part 2")
+        self.assertEqual(len(client.calls), 2)
 
     def test_strip_restarted_prompt_removes_system_instructions_suffix(self):
         self.assertEqual(
@@ -156,6 +219,27 @@ class ChatSessionTests(unittest.TestCase):
     def test_strip_restarted_prompt_removes_user_suffix(self):
         self.assertEqual(strip_restarted_prompt("answer\nUser: next"), "answer")
 
+    def test_strip_restarted_prompt_removes_assistant_suffix(self):
+        self.assertEqual(strip_restarted_prompt("answer\nAssistant: duplicate"), "answer")
+
+    def test_strip_restarted_prompt_removes_qwen_duplicate_assistant_suffix(self):
+        text = (
+            "カー解は角運動量を持つブラックホールの時空構造を記述します。\n\n"
+            "Assistant:\n\n"
+            "ングシンギュラリティ）です。"
+        )
+
+        self.assertEqual(
+            strip_restarted_prompt(text),
+            "カー解は角運動量を持つブラックホールの時空構造を記述します。",
+        )
+
+    def test_strip_restarted_prompt_keeps_inline_assistant_mentions(self):
+        self.assertEqual(
+            strip_restarted_prompt("The token Assistant: is shown inline."),
+            "The token Assistant: is shown inline.",
+        )
+
     def test_strip_restarted_prompt_keeps_inline_mentions(self):
         self.assertEqual(
             strip_restarted_prompt("The phrase System instructions: is shown inline."),
@@ -178,6 +262,12 @@ class ChatSessionTests(unittest.TestCase):
         self.assertEqual(
             format_assistant_output("<think>private</think>\nanswer", show_thinking=True),
             "LLM>\n<think>private</think>\nanswer",
+        )
+
+    def test_format_assistant_output_hides_unclosed_thinking_by_default(self):
+        self.assertEqual(
+            format_assistant_output("<think>long private reasoning"),
+            "LLM>\n",
         )
 
     def test_format_assistant_output_expands_escaped_newlines_for_display(self):
@@ -317,6 +407,34 @@ class OpenAICompletionClientTests(unittest.TestCase):
         self.assertEqual(captured["body"]["temperature"], 0.2)
         self.assertEqual(captured["body"]["stop"], ["\nUser:"])
         self.assertEqual(captured["headers"]["Content-type"], "application/json")
+
+    def test_complete_with_metadata_returns_finish_reason(self):
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                return json.dumps(
+                    {"choices": [{"text": " answer ", "finish_reason": "length"}]}
+                ).encode("utf-8")
+
+        def fake_urlopen(request, timeout):
+            return FakeResponse()
+
+        client = OpenAICompletionClient("http://127.0.0.1:8080")
+
+        with patch("urllib.request.urlopen", fake_urlopen):
+            result = client.complete_with_metadata(
+                "User: hi\nAssistant:",
+                max_tokens=64,
+                temperature=0.2,
+                stop=["\nUser:"],
+            )
+
+        self.assertEqual(result, {"text": "answer", "finish_reason": "length"})
 
     def test_complete_wraps_timeout_error(self):
         def fake_urlopen(request, timeout):
