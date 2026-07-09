@@ -6,6 +6,7 @@ from local_llm_chat.chat import (
     ChatSession,
     DEFAULT_MAX_TOKENS,
     OpenAICompletionClient,
+    THINKING_INSTRUCTIONS,
     format_assistant_output,
     is_stop_command,
     make_terminal_unicode_safe,
@@ -62,6 +63,30 @@ class ChatSessionTests(unittest.TestCase):
         self.assertIn("System instructions:\nBe concise.", prompt)
         self.assertIn("User: hello\nAssistant: hi", prompt)
         self.assertTrue(prompt.endswith("User: what now?\nAssistant:"))
+
+    def test_build_prompt_omits_thinking_instructions_by_default(self):
+        session = ChatSession(instructions="Be concise.")
+
+        prompt = session.build_prompt("what now?")
+
+        self.assertNotIn(THINKING_INSTRUCTIONS, prompt)
+
+    def test_build_prompt_adds_thinking_instructions_when_enabled(self):
+        session = ChatSession(instructions="Be concise.", show_thinking=True)
+
+        prompt = session.build_prompt("what now?")
+
+        self.assertIn("System instructions:\nBe concise.", prompt)
+        self.assertIn(THINKING_INSTRUCTIONS, prompt)
+        self.assertIn("<think>...</think>", prompt)
+        self.assertTrue(prompt.endswith("User: what now?\nAssistant:"))
+
+    def test_build_prompt_can_use_thinking_instructions_without_user_instructions(self):
+        session = ChatSession(show_thinking=True)
+
+        prompt = session.build_prompt("what now?")
+
+        self.assertIn(f"System instructions:\n{THINKING_INSTRUCTIONS}", prompt)
 
     def test_ask_preserves_context_for_lifetime_of_session(self):
         client = FakeClient(["hello", "second answer"])

@@ -15,6 +15,10 @@ from typing import Iterable, Protocol
 STOP_COMMANDS = {"/bye", "/exit", "/quit"}
 DEFAULT_MAX_TOKENS = 2048
 DEFAULT_STOP_SEQUENCES = ["\nUser:", "\nAssistant:", "\nSystem instructions:"]
+THINKING_INSTRUCTIONS = (
+    "When useful, write a brief reasoning block before the final answer using "
+    "<think>...</think>. Always close </think> before writing the final answer."
+)
 
 TERMINAL_ESCAPE_RE = re.compile(
     r"\x1b(?:"
@@ -273,8 +277,13 @@ class ChatSession:
 
     def build_prompt(self, user_text: str) -> str:
         parts: list[str] = []
+        instruction_parts: list[str] = []
         if self.instructions:
-            parts.append(f"System instructions:\n{self.instructions}")
+            instruction_parts.append(self.instructions)
+        if self.show_thinking:
+            instruction_parts.append(THINKING_INSTRUCTIONS)
+        if instruction_parts:
+            parts.append(f"System instructions:\n{chr(10).join(instruction_parts)}")
         if self.turns:
             parts.append(self._format_turns(self.turns))
         parts.append(f"User: {user_text}\nAssistant:")

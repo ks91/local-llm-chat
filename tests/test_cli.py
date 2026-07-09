@@ -1,8 +1,11 @@
+import json
 import unittest
 import tempfile
 from pathlib import Path
 
 from local_llm_chat.cli import (
+    append_output_log,
+    build_parser,
     configure_line_editing,
     is_file_command,
     is_paste_command,
@@ -25,6 +28,24 @@ class FakeReadline:
 
 
 class CliTests(unittest.TestCase):
+    def test_parser_enables_line_editing_and_emoji_by_default(self):
+        args = build_parser().parse_args([])
+
+        self.assertTrue(args.line_editing)
+        self.assertTrue(args.show_emoji)
+
+    def test_parser_can_disable_line_editing_and_emoji(self):
+        args = build_parser().parse_args(["--no-line-editing", "--no-show-emoji"])
+
+        self.assertFalse(args.line_editing)
+        self.assertFalse(args.show_emoji)
+
+    def test_parser_keeps_positive_line_editing_and_emoji_flags(self):
+        args = build_parser().parse_args(["--line-editing", "--show-emoji"])
+
+        self.assertTrue(args.line_editing)
+        self.assertTrue(args.show_emoji)
+
     def test_default_base_url_uses_port_8080(self):
         self.assertEqual(resolve_base_url(port=8080, base_url=None), "http://127.0.0.1:8080")
 
@@ -108,6 +129,35 @@ class CliTests(unittest.TestCase):
     def test_read_message_file_rejects_missing_path(self):
         with self.assertRaisesRegex(RuntimeError, "Usage: /file"):
             read_message_file("/file")
+
+    def test_append_output_log_writes_json_line(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "output.jsonl"
+
+            append_output_log(
+                path,
+                user_text="こんにちは",
+                raw_answer="raw\nanswer",
+                display_output="LLM>\ndisplay",
+            )
+
+            records = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+            self.assertEqual(len(records), 1)
+            self.assertEqual(records[0]["event"], "assistant_response")
+            self.assertEqual(records[0]["user_text"], "こんにちは")
+            self.assertEqual(records[0]["raw_answer"], "raw\nanswer")
+            self.assertEqual(records[0]["display_output"], "LLM>\ndisplay")
+            self.assertIn("timestamp", records[0])
+
+    def test_append_output_log_appends_records(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "output.jsonl"
+
+            append_output_log(path, user_text="one", raw_answer="a", display_output="LLM>\na")
+            append_output_log(path, user_text="two", raw_answer="b", display_output="LLM>\nb")
+
+            records = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+            self.assertEqual([record["user_text"] for record in records], ["one", "two"])
 
 
 if __name__ == "__main__":

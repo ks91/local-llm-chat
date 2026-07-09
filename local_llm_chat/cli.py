@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import argparse
+import json
+import os
 import shlex
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 from .chat import (
@@ -36,7 +39,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--timeout", type=int, default=120)
     parser.add_argument(
         "--line-editing",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
+        default=True,
         help="enable readline/libedit history and cursor bindings",
     )
     parser.add_argument(
@@ -46,8 +50,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--show-emoji",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
+        default=True,
         help="render non-BMP Unicode and \\U00000000-style emoji escapes",
+    )
+    parser.add_argument(
+        "--log-output",
+        type=Path,
+        help="append raw and display-ready assistant output to a JSON Lines file",
     )
     return parser
 
@@ -58,7 +68,7 @@ def resolve_base_url(*, port: int, base_url: str | None) -> str:
     return f"http://127.0.0.1:{port}"
 
 
-def configure_line_editing(readline_module=_READLINE_AUTO, *, enabled: bool = False) -> bool:
+def configure_line_editing(readline_module=_READLINE_AUTO, *, enabled: bool = True) -> bool:
     if not enabled:
         return False
     if readline_module is _READLINE_AUTO:
@@ -113,6 +123,29 @@ def read_message_file(command: str, *, base_dir: Path | None = None) -> str:
         return path.read_text(encoding="utf-8")
     except OSError as exc:
         raise RuntimeError(f"Could not read {path}: {exc}") from exc
+
+
+def append_output_log(
+    path: Path,
+    *,
+    user_text: str,
+    raw_answer: str,
+    display_output: str,
+) -> None:
+    record = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "event": "assistant_response",
+        "user_text": user_text,
+        "raw_answer": raw_answer,
+        "display_output": display_output,
+    }
+    try:
+        with path.open("a", encoding="utf-8") as log_file:
+            log_file.write(json.dumps(record, ensure_ascii=False) + "\n")
+            log_file.flush()
+            os.fsync(log_file.fileno())
+    except OSError as exc:
+        raise RuntimeError(f"Could not write output log {path}: {exc}") from exc
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -173,14 +206,24 @@ def main(argv: list[str] | None = None) -> int:
             print("You can retry, use --timeout to wait longer, or type /bye to exit.")
             continue
 
-        print()
-        print(
-            format_assistant_output(
-                answer,
-                show_thinking=args.show_thinking,
-                show_emoji=args.show_emoji,
-            )
+        display_output = format_assistant_output(
+            answer,
+            show_thinking=args.show_thinking,
+            show_emoji=args.show_emoji,
         )
+        if args.log_output:
+            try:
+                append_output_log(
+                    args.log_output,
+                    user_text=user_text,
+                    raw_answer=answer,
+                    display_output=display_output,
+                )
+            except RuntimeError as exc:
+                print(f"Error: {exc}", file=sys.stderr)
+
+        print()
+        print(display_output)
 
 
 if __name__ == "__main__":

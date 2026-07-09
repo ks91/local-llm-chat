@@ -44,10 +44,16 @@ You>
 ```
 
 Input uses the terminal's normal line editing. Backspace edits the current line
-before Python receives it. Optional `readline`/libedit history and cursor
-bindings can be enabled with `--line-editing`, but they are off by default to
-keep terminal interaction conservative. Chat input history is not saved after
-the process exits.
+before Python receives it. `readline`/libedit history and cursor bindings are
+enabled by default, including Emacs-style bindings where supported. Chat input
+history is not saved after the process exits.
+
+Disable in-process line editing if you need the most conservative terminal
+interaction:
+
+```sh
+python3 -m local_llm_chat --no-line-editing
+```
 
 Very long single-line input may hit the terminal driver's line length limit
 before Python receives it. For long prompts, use multi-line paste mode:
@@ -75,17 +81,28 @@ This keeps generated text from changing terminal state or triggering terminal
 rendering bugs.
 
 For Apple Terminal stability, display output also removes invisible Unicode
-format/control characters and escapes non-BMP Unicode such as many emoji as
-literal `\U00000000`-style text. Common Japanese text remains unchanged.
+format/control characters. Non-BMP Unicode and `\U00000000`-style emoji escapes
+are rendered by default.
 
-If your terminal handles emoji reliably, enable emoji rendering:
+Disable emoji rendering if a terminal has trouble with those glyphs:
 
 ```sh
-python3 -m local_llm_chat --show-emoji
+python3 -m local_llm_chat --no-show-emoji
 ```
 
-This also converts model output such as `\U0001f9e9` into the corresponding
-emoji for display.
+To debug terminal rendering crashes, save each response before it is printed:
+
+```sh
+python3 -m local_llm_chat --log-output output.jsonl
+```
+
+The log is appended as UTF-8 JSON Lines. Each record contains the sanitized user
+message, the raw assistant response, and the display-ready text that was about
+to be printed. The client flushes the file after each response so the last
+record is likely to survive even if the terminal application crashes.
+
+Emoji rendering also converts model output such as `\U0001f9e9` into the
+corresponding emoji for display.
 
 User input is also sanitized before it is added to the in-memory conversation
 history, so pasted terminal control sequences are not sent back to the model in
@@ -139,8 +156,11 @@ python3 -m local_llm_chat \
   --temperature 0.7 \
   --timeout 120 \
   --line-editing \
+  --no-line-editing \
   --show-thinking \
-  --show-emoji
+  --show-emoji \
+  --no-show-emoji \
+  --log-output output.jsonl
 ```
 
 Options:
@@ -151,12 +171,14 @@ Options:
   `finish_reason: length`. Default: `2`
 - `--temperature`: sampling temperature. Default: `0.7`
 - `--timeout`: HTTP request timeout in seconds. Default: `120`
-- `--line-editing`: enable optional in-process readline/libedit input history
-  and cursor bindings. Default: off
+- `--line-editing` / `--no-line-editing`: enable or disable in-process
+  readline/libedit input history and cursor bindings. Default: on
 - `--show-thinking`: show model thinking tags such as `<think>...</think>`.
   Default: off
-- `--show-emoji`: render non-BMP Unicode and `\U00000000`-style emoji escapes
-  such as `\U0001f9e9`. Default: off
+- `--show-emoji` / `--no-show-emoji`: render or escape non-BMP Unicode and
+  `\U00000000`-style emoji escapes such as `\U0001f9e9`. Default: on
+- `--log-output`: append raw and display-ready assistant output to a UTF-8 JSON
+  Lines file for terminal crash debugging. Default: off
 
 ## Thinking Tags
 
@@ -180,6 +202,10 @@ To show and preserve those tags during the current session:
 ```sh
 python3 -m local_llm_chat --show-thinking
 ```
+
+When `--show-thinking` is enabled, the client also adds a short instruction that
+asks the model to use a brief `<think>...</think>` block before the final answer
+when useful, and to close `</think>` before writing the final answer.
 
 The default stop sequences include `\nUser:`, `\nAssistant:`, and
 `\nSystem instructions:` so the server should stop before generating another
