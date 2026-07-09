@@ -20,6 +20,7 @@ from .chat import (
 
 
 _READLINE_AUTO = object()
+_PROMPT_TOOLKIT_AUTO = object()
 PASTE_COMMAND = "/paste"
 PASTE_END_COMMANDS = {"/end", "/send"}
 FILE_COMMAND = "/file"
@@ -83,6 +84,42 @@ def configure_line_editing(readline_module=_READLINE_AUTO, *, enabled: bool = Tr
     readline_module.parse_and_bind("tab: complete")
     readline_module.set_history_length(200)
     return True
+
+
+def configure_input(
+    *,
+    line_editing: bool = True,
+    input_func=input,
+    readline_module=_READLINE_AUTO,
+    prompt_toolkit_module=_PROMPT_TOOLKIT_AUTO,
+):
+    if not line_editing:
+        return input_func
+
+    if prompt_toolkit_module is _PROMPT_TOOLKIT_AUTO:
+        try:
+            from prompt_toolkit import prompt
+            from prompt_toolkit.history import InMemoryHistory
+        except ImportError:
+            prompt = None
+            InMemoryHistory = None
+    elif prompt_toolkit_module is None:
+        prompt = None
+        InMemoryHistory = None
+    else:
+        prompt = prompt_toolkit_module.prompt
+        InMemoryHistory = prompt_toolkit_module.InMemoryHistory
+
+    if prompt is not None:
+        history = InMemoryHistory()
+
+        def prompt_with_history(message=""):
+            return prompt(message, history=history)
+
+        return prompt_with_history
+
+    configure_line_editing(readline_module, enabled=True)
+    return input_func
 
 
 def is_paste_command(text: str) -> bool:
@@ -150,7 +187,7 @@ def append_output_log(
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    configure_line_editing(enabled=args.line_editing)
+    input_func = configure_input(line_editing=args.line_editing)
     instructions = load_instructions(Path(args.instructions))
     base_url = resolve_base_url(port=args.port, base_url=args.base_url)
     client = OpenAICompletionClient(base_url, model=args.model, timeout=args.timeout)
@@ -172,7 +209,7 @@ def main(argv: list[str] | None = None) -> int:
 
     while True:
         try:
-            user_text = input("\nYou> ")
+            user_text = input_func("\nYou> ")
         except EOFError:
             print()
             return 0
@@ -187,7 +224,7 @@ def main(argv: list[str] | None = None) -> int:
             print("Bye.")
             return 0
         if is_paste_command(user_text):
-            user_text = sanitize_user_input(read_paste_input())
+            user_text = sanitize_user_input(read_paste_input(input_func=input_func))
             if not user_text.strip():
                 continue
         elif is_file_command(user_text):

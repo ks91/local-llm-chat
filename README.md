@@ -7,12 +7,21 @@ completion API at `/v1/completions`. Conversation history is kept only in the
 running Python process. If you stop and start this client again, the chat starts
 with no previous context.
 
-The client uses only the Python standard library.
+The client works with only the Python standard library. If the optional
+`prompt_toolkit` package is installed, it is used automatically for better
+interactive line editing.
 
 ## Requirements
 
 - Python 3.10 or newer
 - A local OpenAI-compatible completion server
+
+Optional, for more reliable cursor movement, wrapping, and backspace behavior
+with long or non-ASCII input:
+
+```sh
+python3 -m pip install prompt_toolkit
+```
 
 ## Start the model server
 
@@ -47,6 +56,15 @@ Input uses the terminal's normal line editing. Backspace edits the current line
 before Python receives it. `readline`/libedit history and cursor bindings are
 enabled by default, including Emacs-style bindings where supported. Chat input
 history is not saved after the process exits.
+
+If `prompt_toolkit` is installed, the client uses it instead of Python's
+`readline` module. This usually gives better display behavior for wrapped lines
+and Japanese text. Without it, the client falls back to the standard-library
+`readline`/libedit support.
+
+During one running session, previous input can be recalled with Up/Down or
+Ctrl-P/Ctrl-N. Input history is in memory only and is discarded when the client
+exits.
 
 Disable in-process line editing if you need the most conservative terminal
 interaction:

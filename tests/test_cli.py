@@ -6,6 +6,7 @@ from pathlib import Path
 from local_llm_chat.cli import (
     append_output_log,
     build_parser,
+    configure_input,
     configure_line_editing,
     is_file_command,
     is_paste_command,
@@ -25,6 +26,18 @@ class FakeReadline:
 
     def set_history_length(self, value):
         self.history_length = value
+
+
+class FakePromptToolkit:
+    prompt_calls = []
+
+    class InMemoryHistory:
+        pass
+
+    @classmethod
+    def prompt(cls, message="", *, history=None):
+        cls.prompt_calls.append({"message": message, "history": history})
+        return f"prompted: {message}"
 
 
 class CliTests(unittest.TestCase):
@@ -77,6 +90,71 @@ class CliTests(unittest.TestCase):
 
     def test_configure_line_editing_tolerates_missing_readline(self):
         self.assertFalse(configure_line_editing(None, enabled=True))
+
+    def test_configure_input_uses_basic_input_when_line_editing_is_disabled(self):
+        readline = FakeReadline()
+        input_func = lambda prompt="": prompt
+
+        selected = configure_input(
+            line_editing=False,
+            input_func=input_func,
+            readline_module=readline,
+            prompt_toolkit_module=FakePromptToolkit,
+        )
+
+        self.assertIs(selected, input_func)
+        self.assertEqual(readline.parse_and_bind_calls, [])
+
+    def test_configure_input_prefers_prompt_toolkit_when_available(self):
+        readline = FakeReadline()
+        input_func = lambda prompt="": prompt
+        FakePromptToolkit.prompt_calls = []
+
+        selected = configure_input(
+            line_editing=True,
+            input_func=input_func,
+            readline_module=readline,
+            prompt_toolkit_module=FakePromptToolkit,
+        )
+
+        self.assertEqual(selected("You> "), "prompted: You> ")
+        self.assertEqual(readline.parse_and_bind_calls, [])
+        self.assertIsInstance(
+            FakePromptToolkit.prompt_calls[0]["history"],
+            FakePromptToolkit.InMemoryHistory,
+        )
+
+    def test_configure_input_reuses_prompt_toolkit_history(self):
+        FakePromptToolkit.prompt_calls = []
+
+        selected = configure_input(
+            line_editing=True,
+            input_func=lambda prompt="": prompt,
+            readline_module=FakeReadline(),
+            prompt_toolkit_module=FakePromptToolkit,
+        )
+
+        selected("first> ")
+        selected("second> ")
+
+        self.assertIs(
+            FakePromptToolkit.prompt_calls[0]["history"],
+            FakePromptToolkit.prompt_calls[1]["history"],
+        )
+
+    def test_configure_input_falls_back_to_readline_without_prompt_toolkit(self):
+        readline = FakeReadline()
+        input_func = lambda prompt="": prompt
+
+        selected = configure_input(
+            line_editing=True,
+            input_func=input_func,
+            readline_module=readline,
+            prompt_toolkit_module=None,
+        )
+
+        self.assertIs(selected, input_func)
+        self.assertIn("set editing-mode emacs", readline.parse_and_bind_calls)
 
     def test_is_paste_command(self):
         self.assertTrue(is_paste_command(" /paste "))
