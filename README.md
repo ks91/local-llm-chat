@@ -20,8 +20,12 @@ Optional, for more reliable cursor movement, wrapping, and backspace behavior
 with long or non-ASCII input:
 
 ```sh
-python3 -m pip install prompt_toolkit
+scripts/install.sh
 ```
+
+The install script creates `.venv` in this repository and installs
+`prompt_toolkit` there. It does not modify the Homebrew/system Python
+environment.
 
 ## Start the model server
 
@@ -41,6 +45,32 @@ The chat client defaults to `http://127.0.0.1:8080`.
 ## Start chatting
 
 From this repository:
+
+```sh
+scripts/run.sh
+```
+
+The run script uses `.venv/bin/python` when it exists, otherwise it falls back
+to `python3`. Any options passed to the script are passed through to
+`local_llm_chat`.
+
+By default, `scripts/run.sh` enables `--log-output` and writes JSON Lines logs
+under `logs/` using this filename shape:
+
+```text
+logs/<model>-log-YYYYMMDD-HHMMSS-pid<PID>.jsonl
+```
+
+The model name is read from the server's OpenAI-compatible `/v1/models`
+endpoint when available. If the returned name is a model file path, the log name
+uses only the basename. Common file extensions and quantization suffixes such
+as `.gguf`, `Q8_0`, and `Q4_K_M` are removed. If the server is not running or
+does not expose that endpoint, the script uses `local`.
+
+Pass `--log-output path/to/file.jsonl` yourself to override the default log
+path.
+
+You can still run the module directly:
 
 ```sh
 python3 -m local_llm_chat

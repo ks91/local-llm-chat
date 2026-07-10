@@ -1,4 +1,5 @@
 logs/
+.venv/
 .loglm_agent
 __pycache__/
 *.pyc
