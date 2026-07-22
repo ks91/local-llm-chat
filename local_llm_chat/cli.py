@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -28,6 +31,9 @@ PASTE_END_COMMANDS = {"/end", "/send"}
 FILE_COMMAND = "/file"
 _PYPDF_AUTO = object()
 _PDFTOTEXT_AUTO = object()
+_PDFTOPPM_AUTO = object()
+DEFAULT_PDF_IMAGE_DPI = 144
+DEFAULT_PDF_IMAGE_MAX_PAGES = 8
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -65,10 +71,30 @@ def build_parser() -> argparse.ArgumentParser:
         help="append raw and display-ready assistant output to a JSON Lines file",
     )
     parser.add_argument(
+        "--pdf-images",
+        action="store_true",
+        help="also render PDF pages to images and send them to a multimodal model",
+    )
+    parser.add_argument(
+        "--pdf-image-dpi",
+        type=int,
+        default=DEFAULT_PDF_IMAGE_DPI,
+        help=f"resolution for --pdf-images rendering (default: {DEFAULT_PDF_IMAGE_DPI})",
+    )
+    parser.add_argument(
+        "--pdf-image-max-pages",
+        type=int,
+        default=DEFAULT_PDF_IMAGE_MAX_PAGES,
+        help=(
+            "maximum number of PDF pages to render for --pdf-images "
+            f"(default: {DEFAULT_PDF_IMAGE_MAX_PAGES})"
+        ),
+    )
+    parser.add_argument(
         "pdf",
         nargs="?",
         type=Path,
-        help="read a text PDF once, ask the model, print the answer, and exit",
+        help="read a PDF once, ask the model, print the answer, and exit",
     )
     return parser
 
@@ -259,6 +285,96 @@ def build_pdf_user_text(path: Path, text: str) -> str:
     )
 
 
+def build_pdf_multimodal_user_text(path: Path, text: str) -> str:
+    if text.strip():
+        return (
+            "Read the following PDF according to the system instructions. "
+            "Use both the extracted text and the attached page images.\n\n"
+            f"PDF file: {path}\n\n"
+            "Extracted text:\n"
+            f"{text}"
+        )
+    return (
+        "Read the following PDF according to the system instructions. "
+        "No extractable text was found, so use the attached page images.\n\n"
+        f"PDF file: {path}"
+    )
+
+
+def _pdf_image_sort_key(path: Path) -> tuple[int, str]:
+    match = re.search(r"-(\d+)\.png\Z", path.name)
+    if match:
+        return (int(match.group(1)), path.name)
+    return (0, path.name)
+
+
+def render_pdf_pages_to_image_urls(
+    path: Path,
+    *,
+    dpi: int = DEFAULT_PDF_IMAGE_DPI,
+    max_pages: int = DEFAULT_PDF_IMAGE_MAX_PAGES,
+    pdftoppm_command=_PDFTOPPM_AUTO,
+    runner=subprocess.run,
+) -> list[str]:
+    if path.suffix.lower() != ".pdf":
+        raise RuntimeError(f"Expected a PDF file: {path}")
+    if not path.exists():
+        raise RuntimeError(f"PDF file does not exist: {path}")
+    if dpi <= 0:
+        raise RuntimeError("--pdf-image-dpi must be positive")
+    if max_pages <= 0:
+        raise RuntimeError("--pdf-image-max-pages must be positive")
+
+    if pdftoppm_command is _PDFTOPPM_AUTO:
+        pdftoppm_command = shutil.which("pdftoppm")
+    if not pdftoppm_command:
+        raise RuntimeError(
+            "PDF image support requires pdftoppm. Run scripts/install.sh or install poppler."
+        )
+
+    with tempfile.TemporaryDirectory(prefix="local-llm-chat-pdf-") as tmp:
+        prefix = Path(tmp) / "page"
+        try:
+            result = runner(
+                [
+                    str(pdftoppm_command),
+                    "-png",
+                    "-r",
+                    str(dpi),
+                    "-f",
+                    "1",
+                    "-l",
+                    str(max_pages),
+                    str(path),
+                    str(prefix),
+                ],
+                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=120,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise RuntimeError(f"Could not render PDF pages: {exc}") from exc
+
+        if result.returncode != 0:
+            if isinstance(result.stderr, bytes):
+                stderr = result.stderr.decode("utf-8", errors="replace").strip()
+            else:
+                stderr = str(result.stderr).strip()
+            detail = f": {stderr}" if stderr else ""
+            raise RuntimeError(f"Could not render PDF pages with pdftoppm{detail}")
+
+        image_paths = sorted(Path(tmp).glob("page-*.png"), key=_pdf_image_sort_key)
+        if not image_paths:
+            raise RuntimeError(f"No PDF page images were rendered from {path}")
+
+        image_urls = []
+        for image_path in image_paths:
+            encoded = base64.b64encode(image_path.read_bytes()).decode("ascii")
+            image_urls.append(f"data:image/png;base64,{encoded}")
+        return image_urls
+
+
 def append_output_log(
     path: Path,
     *,
@@ -326,8 +442,39 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.pdf:
         try:
-            user_text = build_pdf_user_text(args.pdf, read_pdf_text(args.pdf))
-            answer = session.ask(user_text)
+            if args.pdf_images:
+                try:
+                    pdf_text = read_pdf_text(args.pdf)
+                except RuntimeError:
+                    pdf_text = ""
+                image_urls = render_pdf_pages_to_image_urls(
+                    args.pdf,
+                    dpi=args.pdf_image_dpi,
+                    max_pages=args.pdf_image_max_pages,
+                )
+                user_text = build_pdf_multimodal_user_text(args.pdf, pdf_text)
+                answer = ""
+                finish_reason: str | None = "length"
+                continuations = 0
+                while (
+                    finish_reason == "length"
+                    and continuations <= args.max_continuations
+                ):
+                    result = client.chat_complete_with_images(
+                        text=user_text,
+                        image_urls=image_urls,
+                        instructions=instructions,
+                        previous_answer=answer,
+                        max_tokens=args.max_tokens,
+                        temperature=args.temperature,
+                        show_thinking=args.show_thinking,
+                    )
+                    answer += result["text"] or ""
+                    finish_reason = result["finish_reason"]
+                    continuations += 1
+            else:
+                user_text = build_pdf_user_text(args.pdf, read_pdf_text(args.pdf))
+                answer = session.ask(user_text)
         except RuntimeError as exc:
             print(f"Error: {exc}", file=sys.stderr)
             return 1

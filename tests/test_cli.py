@@ -5,6 +5,7 @@ from pathlib import Path
 
 from local_llm_chat.cli import (
     append_output_log,
+    build_pdf_multimodal_user_text,
     build_pdf_user_text,
     build_parser,
     configure_input,
@@ -15,6 +16,7 @@ from local_llm_chat.cli import (
     read_message_file,
     read_pdf_text,
     read_paste_input,
+    render_pdf_pages_to_image_urls,
     resolve_base_url,
 )
 
@@ -92,6 +94,29 @@ class CliTests(unittest.TestCase):
         args = build_parser().parse_args(["paper.pdf"])
 
         self.assertEqual(args.pdf, Path("paper.pdf"))
+
+    def test_parser_disables_pdf_images_by_default(self):
+        args = build_parser().parse_args(["paper.pdf"])
+
+        self.assertFalse(args.pdf_images)
+        self.assertEqual(args.pdf_image_dpi, 144)
+        self.assertEqual(args.pdf_image_max_pages, 8)
+
+    def test_parser_can_enable_pdf_images(self):
+        args = build_parser().parse_args(
+            [
+                "--pdf-images",
+                "--pdf-image-dpi",
+                "96",
+                "--pdf-image-max-pages",
+                "3",
+                "paper.pdf",
+            ]
+        )
+
+        self.assertTrue(args.pdf_images)
+        self.assertEqual(args.pdf_image_dpi, 96)
+        self.assertEqual(args.pdf_image_max_pages, 3)
 
     def test_default_base_url_uses_port_8080(self):
         self.assertEqual(resolve_base_url(port=8080, base_url=None), "http://127.0.0.1:8080")
@@ -344,6 +369,75 @@ class CliTests(unittest.TestCase):
         self.assertIn("Read the following PDF text", text)
         self.assertIn("PDF file: paper.pdf", text)
         self.assertTrue(text.endswith("body"))
+
+    def test_build_pdf_multimodal_user_text_includes_text_and_image_instruction(self):
+        text = build_pdf_multimodal_user_text(Path("paper.pdf"), "body")
+
+        self.assertIn("Use both the extracted text and the attached page images", text)
+        self.assertIn("PDF file: paper.pdf", text)
+        self.assertTrue(text.endswith("body"))
+
+    def test_build_pdf_multimodal_user_text_handles_missing_text(self):
+        text = build_pdf_multimodal_user_text(Path("paper.pdf"), "")
+
+        self.assertIn("No extractable text was found", text)
+        self.assertIn("attached page images", text)
+
+    def test_render_pdf_pages_to_image_urls_runs_pdftoppm(self):
+        calls = []
+
+        def runner(args, **kwargs):
+            calls.append({"args": args, "kwargs": kwargs})
+            Path(f"{args[-1]}-2.png").write_bytes(b"page2")
+            Path(f"{args[-1]}-1.png").write_bytes(b"page1")
+            return FakeCompletedProcess()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "paper.pdf"
+            path.write_bytes(b"%PDF-1.4\n")
+
+            urls = render_pdf_pages_to_image_urls(
+                path,
+                dpi=96,
+                max_pages=2,
+                pdftoppm_command="pdftoppm",
+                runner=runner,
+            )
+
+        self.assertEqual(
+            calls[0]["args"][:-2],
+            ["pdftoppm", "-png", "-r", "96", "-f", "1", "-l", "2"],
+        )
+        self.assertEqual(calls[0]["args"][-2], str(path))
+        self.assertEqual(
+            urls,
+            [
+                "data:image/png;base64,cGFnZTE=",
+                "data:image/png;base64,cGFnZTI=",
+            ],
+        )
+
+    def test_render_pdf_pages_to_image_urls_requires_pdftoppm(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "paper.pdf"
+            path.write_bytes(b"%PDF-1.4\n")
+
+            with self.assertRaisesRegex(RuntimeError, "requires pdftoppm"):
+                render_pdf_pages_to_image_urls(path, pdftoppm_command=None)
+
+    def test_render_pdf_pages_to_image_urls_rejects_bad_limits(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "paper.pdf"
+            path.write_bytes(b"%PDF-1.4\n")
+
+            with self.assertRaisesRegex(RuntimeError, "dpi"):
+                render_pdf_pages_to_image_urls(path, dpi=0, pdftoppm_command="pdftoppm")
+            with self.assertRaisesRegex(RuntimeError, "max-pages"):
+                render_pdf_pages_to_image_urls(
+                    path,
+                    max_pages=0,
+                    pdftoppm_command="pdftoppm",
+                )
 
     def test_append_output_log_writes_json_line(self):
         with tempfile.TemporaryDirectory() as tmp:

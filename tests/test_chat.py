@@ -461,6 +461,125 @@ class OpenAICompletionClientTests(unittest.TestCase):
 
         self.assertEqual(result, {"text": "answer", "finish_reason": "length"})
 
+    def test_chat_complete_with_images_posts_typed_content(self):
+        captured = {}
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                return json.dumps(
+                    {
+                        "choices": [
+                            {
+                                "message": {"content": " answer "},
+                                "finish_reason": "stop",
+                            }
+                        ]
+                    }
+                ).encode("utf-8")
+
+        def fake_urlopen(request, timeout):
+            captured["url"] = request.full_url
+            captured["timeout"] = timeout
+            captured["body"] = json.loads(request.data.decode("utf-8"))
+            return FakeResponse()
+
+        client = OpenAICompletionClient(
+            "http://127.0.0.1:8080",
+            model="vision",
+            timeout=7,
+        )
+
+        with patch("urllib.request.urlopen", fake_urlopen):
+            result = client.chat_complete_with_images(
+                text="Read this PDF.",
+                image_urls=["data:image/png;base64,abc"],
+                instructions="Summarize.",
+                previous_answer="partial",
+                max_tokens=256,
+                temperature=0.1,
+                show_thinking=False,
+            )
+
+        self.assertEqual(result, {"text": "answer", "finish_reason": "stop"})
+        self.assertEqual(captured["url"], "http://127.0.0.1:8080/v1/chat/completions")
+        self.assertEqual(captured["timeout"], 7)
+        self.assertEqual(captured["body"]["model"], "vision")
+        self.assertEqual(captured["body"]["max_tokens"], 256)
+        self.assertEqual(captured["body"]["temperature"], 0.1)
+        self.assertEqual(
+            captured["body"]["chat_template_kwargs"],
+            {"enable_thinking": False},
+        )
+        self.assertEqual(
+            captured["body"]["messages"][0],
+            {"role": "system", "content": "Summarize."},
+        )
+        self.assertEqual(captured["body"]["messages"][1]["role"], "user")
+        self.assertEqual(
+            captured["body"]["messages"][1]["content"],
+            [
+                {"type": "text", "text": "Read this PDF."},
+                {
+                    "type": "image_url",
+                    "image_url": {"url": "data:image/png;base64,abc"},
+                },
+            ],
+        )
+        self.assertEqual(
+            captured["body"]["messages"][2],
+            {"role": "assistant", "content": "partial"},
+        )
+        self.assertEqual(captured["body"]["messages"][3]["role"], "user")
+        self.assertIn("Continue", captured["body"]["messages"][3]["content"])
+
+    def test_chat_complete_with_images_can_include_reasoning_content(self):
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                return json.dumps(
+                    {
+                        "choices": [
+                            {
+                                "message": {
+                                    "reasoning_content": "thinking",
+                                    "content": "answer",
+                                },
+                                "finish_reason": "stop",
+                            }
+                        ]
+                    }
+                ).encode("utf-8")
+
+        def fake_urlopen(request, timeout):
+            return FakeResponse()
+
+        client = OpenAICompletionClient("http://127.0.0.1:8080")
+
+        with patch("urllib.request.urlopen", fake_urlopen):
+            result = client.chat_complete_with_images(
+                text="Read this PDF.",
+                image_urls=["data:image/png;base64,abc"],
+                max_tokens=256,
+                temperature=0.1,
+                show_thinking=True,
+            )
+
+        self.assertEqual(
+            result,
+            {"text": "<think>\nthinking\n</think>\n\nanswer", "finish_reason": "stop"},
+        )
+
     def test_complete_wraps_timeout_error(self):
         def fake_urlopen(request, timeout):
             raise TimeoutError("timed out")

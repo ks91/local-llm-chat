@@ -9,7 +9,7 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable, Protocol
+from typing import Any, Iterable, Protocol
 
 
 STOP_COMMANDS = {"/bye", "/exit", "/quit"}
@@ -259,6 +259,75 @@ class OpenAICompletionClient:
             text = str(choice["message"].get("content", "")).strip()
             return {"text": text, "finish_reason": choice.get("finish_reason")}
         raise RuntimeError("LLM server response choice did not include text")
+
+    def chat_complete_with_images(
+        self,
+        *,
+        text: str,
+        image_urls: list[str],
+        instructions: str = "",
+        previous_answer: str = "",
+        max_tokens: int,
+        temperature: float,
+        show_thinking: bool = False,
+    ) -> dict[str, str | None]:
+        content: list[dict[str, Any]] = [{"type": "text", "text": text}]
+        content.extend(
+            {"type": "image_url", "image_url": {"url": image_url}}
+            for image_url in image_urls
+        )
+        messages: list[dict[str, Any]] = []
+        if instructions:
+            messages.append({"role": "system", "content": instructions})
+        messages.append({"role": "user", "content": content})
+        if previous_answer:
+            messages.append({"role": "assistant", "content": previous_answer})
+            messages.append(
+                {
+                    "role": "user",
+                    "content": "Continue the previous answer from where it stopped.",
+                }
+            )
+        payload: dict[str, Any] = {
+            "model": self.model,
+            "messages": messages,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "chat_template_kwargs": {"enable_thinking": show_thinking},
+        }
+        request = urllib.request.Request(
+            f"{self.base_url}/v1/chat/completions",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                body = json.loads(response.read().decode("utf-8"))
+        except TimeoutError as exc:
+            raise RuntimeError(
+                f"LLM server request timed out after {self.timeout} seconds"
+            ) from exc
+        except urllib.error.URLError as exc:
+            raise RuntimeError(f"LLM server request failed: {exc}") from exc
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("LLM server returned invalid JSON") from exc
+
+        try:
+            choice = body["choices"][0]
+            message = choice["message"]
+        except (KeyError, IndexError, TypeError) as exc:
+            raise RuntimeError("LLM server response did not include a message") from exc
+
+        if not isinstance(message, dict):
+            raise RuntimeError("LLM server response message was not an object")
+
+        content_text = str(message.get("content", "")).strip()
+        reasoning_text = str(message.get("reasoning_content", "")).strip()
+        if show_thinking and reasoning_text:
+            content_text = f"<think>\n{reasoning_text}\n</think>\n\n{content_text}".strip()
+        return {"text": content_text, "finish_reason": choice.get("finish_reason")}
 
 
 @dataclass

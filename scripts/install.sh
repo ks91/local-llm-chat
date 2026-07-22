@@ -13,11 +13,11 @@ fi
 "$venv_dir/bin/python" -m pip install --upgrade pip
 "$venv_dir/bin/python" -m pip install prompt_toolkit pypdf
 
-if ! command -v pdftotext >/dev/null 2>&1; then
+if ! command -v pdftotext >/dev/null 2>&1 || ! command -v pdftoppm >/dev/null 2>&1; then
   if command -v brew >/dev/null 2>&1; then
     brew install poppler
   else
-    printf '%s\n' 'pdftotext was not found. Install poppler for better PDF text extraction.' >&2
+    printf '%s\n' 'pdftotext or pdftoppm was not found. Install poppler for PDF text and image extraction.' >&2
   fi
 fi
 
