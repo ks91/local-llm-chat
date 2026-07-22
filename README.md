@@ -24,8 +24,9 @@ scripts/install.sh
 ```
 
 The install script creates `.venv` in this repository and installs
-`prompt_toolkit` there. It does not modify the Homebrew/system Python
-environment.
+`prompt_toolkit` and `pypdf` there. It also installs Homebrew `poppler` when
+`pdftotext` is not already available. It does not modify the Homebrew/system
+Python environment.
 
 ## Start the model server
 
@@ -74,6 +75,26 @@ You can still run the module directly:
 
 ```sh
 python3 -m local_llm_chat
+```
+
+## Read a Text PDF
+
+Pass a PDF path to read it once and exit:
+
+```sh
+scripts/run.sh paper.pdf
+```
+
+The client extracts text with `pdftotext -layout` when available, falling back
+to `pypdf` otherwise. `pdftotext` is usually more reliable for Japanese PDFs.
+The extracted text is sent as a single user message with the configured
+instructions, the answer is printed, and the process exits. This is for text
+PDFs. Scanned/image-only PDFs need future multimodal/image support.
+
+Use a custom instruction file:
+
+```sh
+scripts/run.sh --instructions summarize.md paper.pdf
 ```
 
 You will see a prompt like this:

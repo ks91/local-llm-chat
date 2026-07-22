@@ -5,12 +5,15 @@ from pathlib import Path
 
 from local_llm_chat.cli import (
     append_output_log,
+    build_pdf_user_text,
     build_parser,
     configure_input,
     configure_line_editing,
+    extract_pdf_text_with_pdftotext,
     is_file_command,
     is_paste_command,
     read_message_file,
+    read_pdf_text,
     read_paste_input,
     resolve_base_url,
 )
@@ -40,6 +43,32 @@ class FakePromptToolkit:
         return f"prompted: {message}"
 
 
+class FakePdfPage:
+    def __init__(self, text):
+        self.text = text
+
+    def extract_text(self):
+        return self.text
+
+
+class FakePdfModule:
+    class PdfReader:
+        def __init__(self, path):
+            self.path = path
+            self.pages = [
+                FakePdfPage("first page"),
+                FakePdfPage(" "),
+                FakePdfPage("second page"),
+            ]
+
+
+class FakeCompletedProcess:
+    def __init__(self, *, stdout="", stderr="", returncode=0):
+        self.stdout = stdout
+        self.stderr = stderr
+        self.returncode = returncode
+
+
 class CliTests(unittest.TestCase):
     def test_parser_enables_line_editing_and_emoji_by_default(self):
         args = build_parser().parse_args([])
@@ -58,6 +87,11 @@ class CliTests(unittest.TestCase):
 
         self.assertTrue(args.line_editing)
         self.assertTrue(args.show_emoji)
+
+    def test_parser_accepts_optional_pdf_path(self):
+        args = build_parser().parse_args(["paper.pdf"])
+
+        self.assertEqual(args.pdf, Path("paper.pdf"))
 
     def test_default_base_url_uses_port_8080(self):
         self.assertEqual(resolve_base_url(port=8080, base_url=None), "http://127.0.0.1:8080")
@@ -207,6 +241,109 @@ class CliTests(unittest.TestCase):
     def test_read_message_file_rejects_missing_path(self):
         with self.assertRaisesRegex(RuntimeError, "Usage: /file"):
             read_message_file("/file")
+
+    def test_read_pdf_text_extracts_text_from_pages(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "paper.pdf"
+            path.write_bytes(b"%PDF-1.4\n")
+
+            self.assertEqual(
+                read_pdf_text(path, pypdf_module=FakePdfModule),
+                "first page\n\nsecond page",
+            )
+
+    def test_extract_pdf_text_with_pdftotext_runs_layout_mode(self):
+        calls = []
+
+        def runner(args, **kwargs):
+            calls.append({"args": args, "kwargs": kwargs})
+            return FakeCompletedProcess(stdout="pdftotext output\n")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "paper.pdf"
+            path.write_bytes(b"%PDF-1.4\n")
+
+            self.assertEqual(
+                extract_pdf_text_with_pdftotext(
+                    path,
+                    pdftotext_command="pdftotext",
+                    runner=runner,
+                ),
+                "pdftotext output",
+            )
+
+        self.assertEqual(calls[0]["args"], ["pdftotext", "-layout", str(path), "-"])
+        self.assertEqual(calls[0]["kwargs"]["encoding"], "utf-8")
+
+    def test_extract_pdf_text_with_pdftotext_returns_none_when_unavailable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "paper.pdf"
+            path.write_bytes(b"%PDF-1.4\n")
+
+            self.assertIsNone(
+                extract_pdf_text_with_pdftotext(path, pdftotext_command=None)
+            )
+
+    def test_extract_pdf_text_with_pdftotext_returns_none_on_failure(self):
+        def runner(args, **kwargs):
+            return FakeCompletedProcess(stderr="bad pdf", returncode=1)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "paper.pdf"
+            path.write_bytes(b"%PDF-1.4\n")
+
+            self.assertIsNone(
+                extract_pdf_text_with_pdftotext(
+                    path,
+                    pdftotext_command="pdftotext",
+                    runner=runner,
+                )
+            )
+
+    def test_read_pdf_text_prefers_pdftotext(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "paper.pdf"
+            path.write_bytes(b"%PDF-1.4\n")
+            command = Path(tmp) / "fake-pdftotext"
+            command.write_text("#!/bin/sh\nprintf 'from pdftotext\\n'\n", encoding="utf-8")
+            command.chmod(0o755)
+
+            self.assertEqual(
+                read_pdf_text(
+                    path,
+                    pypdf_module=FakePdfModule,
+                    pdftotext_command=command,
+                ),
+                "from pdftotext",
+            )
+
+    def test_read_pdf_text_rejects_non_pdf_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "paper.txt"
+            path.write_text("not pdf", encoding="utf-8")
+
+            with self.assertRaisesRegex(RuntimeError, "Expected a PDF"):
+                read_pdf_text(path, pypdf_module=FakePdfModule)
+
+    def test_read_pdf_text_rejects_missing_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(RuntimeError, "does not exist"):
+                read_pdf_text(Path(tmp) / "missing.pdf", pypdf_module=FakePdfModule)
+
+    def test_read_pdf_text_reports_missing_pypdf(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "paper.pdf"
+            path.write_bytes(b"%PDF-1.4\n")
+
+            with self.assertRaisesRegex(RuntimeError, "requires pdftotext or pypdf"):
+                read_pdf_text(path, pypdf_module=None)
+
+    def test_build_pdf_user_text_includes_path_and_extracted_text(self):
+        text = build_pdf_user_text(Path("paper.pdf"), "body")
+
+        self.assertIn("Read the following PDF text", text)
+        self.assertIn("PDF file: paper.pdf", text)
+        self.assertTrue(text.endswith("body"))
 
     def test_append_output_log_writes_json_line(self):
         with tempfile.TemporaryDirectory() as tmp:

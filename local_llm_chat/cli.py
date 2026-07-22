@@ -4,6 +4,8 @@ import argparse
 import json
 import os
 import shlex
+import shutil
+import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -24,6 +26,8 @@ _PROMPT_TOOLKIT_AUTO = object()
 PASTE_COMMAND = "/paste"
 PASTE_END_COMMANDS = {"/end", "/send"}
 FILE_COMMAND = "/file"
+_PYPDF_AUTO = object()
+_PDFTOTEXT_AUTO = object()
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -59,6 +63,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--log-output",
         type=Path,
         help="append raw and display-ready assistant output to a JSON Lines file",
+    )
+    parser.add_argument(
+        "pdf",
+        nargs="?",
+        type=Path,
+        help="read a text PDF once, ask the model, print the answer, and exit",
     )
     return parser
 
@@ -162,6 +172,93 @@ def read_message_file(command: str, *, base_dir: Path | None = None) -> str:
         raise RuntimeError(f"Could not read {path}: {exc}") from exc
 
 
+def extract_pdf_text_with_pdftotext(
+    path: Path,
+    *,
+    pdftotext_command=_PDFTOTEXT_AUTO,
+    runner=subprocess.run,
+) -> str | None:
+    if pdftotext_command is _PDFTOTEXT_AUTO:
+        pdftotext_command = shutil.which("pdftotext")
+    if not pdftotext_command:
+        return None
+
+    try:
+        result = runner(
+            [str(pdftotext_command), "-layout", str(path), "-"],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=60,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+    if result.returncode != 0:
+        return None
+    text = result.stdout.strip()
+    return text or None
+
+
+def extract_pdf_text_with_pypdf(path: Path, *, pypdf_module=_PYPDF_AUTO) -> str:
+    if pypdf_module is _PYPDF_AUTO:
+        try:
+            import pypdf as pypdf_module
+        except ImportError as exc:
+            raise RuntimeError(
+                "PDF support requires pdftotext or pypdf. Run scripts/install.sh, "
+                "install poppler, or install pypdf."
+            ) from exc
+    if pypdf_module is None:
+        raise RuntimeError("PDF support requires pdftotext or pypdf.")
+
+    try:
+        reader = pypdf_module.PdfReader(path)
+        pages = []
+        for page in reader.pages:
+            text = page.extract_text() or ""
+            if text.strip():
+                pages.append(text.strip())
+    except Exception as exc:
+        raise RuntimeError(f"Could not extract text from {path}: {exc}") from exc
+
+    return "\n\n".join(pages).strip()
+
+
+def read_pdf_text(
+    path: Path,
+    *,
+    pypdf_module=_PYPDF_AUTO,
+    pdftotext_command=_PDFTOTEXT_AUTO,
+) -> str:
+    if path.suffix.lower() != ".pdf":
+        raise RuntimeError(f"Expected a PDF file: {path}")
+    if not path.exists():
+        raise RuntimeError(f"PDF file does not exist: {path}")
+
+    extracted = extract_pdf_text_with_pdftotext(
+        path,
+        pdftotext_command=pdftotext_command,
+    )
+    if extracted is None:
+        extracted = extract_pdf_text_with_pypdf(path, pypdf_module=pypdf_module)
+
+    if not extracted:
+        raise RuntimeError(f"No extractable text found in {path}")
+    return extracted
+
+
+def build_pdf_user_text(path: Path, text: str) -> str:
+    return (
+        f"Read the following PDF text according to the system instructions.\n\n"
+        f"PDF file: {path}\n\n"
+        f"{text}"
+    )
+
+
 def append_output_log(
     path: Path,
     *,
@@ -185,9 +282,36 @@ def append_output_log(
         raise RuntimeError(f"Could not write output log {path}: {exc}") from exc
 
 
+def display_and_log_answer(
+    *,
+    answer: str,
+    user_text: str,
+    show_thinking: bool,
+    show_emoji: bool,
+    log_output: Path | None,
+) -> None:
+    display_output = format_assistant_output(
+        answer,
+        show_thinking=show_thinking,
+        show_emoji=show_emoji,
+    )
+    if log_output:
+        try:
+            append_output_log(
+                log_output,
+                user_text=user_text,
+                raw_answer=answer,
+                display_output=display_output,
+            )
+        except RuntimeError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+
+    print()
+    print(display_output)
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    input_func = configure_input(line_editing=args.line_editing)
     instructions = load_instructions(Path(args.instructions))
     base_url = resolve_base_url(port=args.port, base_url=args.base_url)
     client = OpenAICompletionClient(base_url, model=args.model, timeout=args.timeout)
@@ -200,6 +324,23 @@ def main(argv: list[str] | None = None) -> int:
         show_thinking=args.show_thinking,
     )
 
+    if args.pdf:
+        try:
+            user_text = build_pdf_user_text(args.pdf, read_pdf_text(args.pdf))
+            answer = session.ask(user_text)
+        except RuntimeError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return 1
+        display_and_log_answer(
+            answer=answer,
+            user_text=user_text,
+            show_thinking=args.show_thinking,
+            show_emoji=args.show_emoji,
+            log_output=args.log_output,
+        )
+        return 0
+
+    input_func = configure_input(line_editing=args.line_editing)
     print("Local LLM chat. Type /bye, /quit, or /exit to stop gracefully.")
     print("Use /paste for multi-line input or /file path for long input.")
     if instructions:
@@ -243,24 +384,13 @@ def main(argv: list[str] | None = None) -> int:
             print("You can retry, use --timeout to wait longer, or type /bye to exit.")
             continue
 
-        display_output = format_assistant_output(
-            answer,
+        display_and_log_answer(
+            answer=answer,
+            user_text=user_text,
             show_thinking=args.show_thinking,
             show_emoji=args.show_emoji,
+            log_output=args.log_output,
         )
-        if args.log_output:
-            try:
-                append_output_log(
-                    args.log_output,
-                    user_text=user_text,
-                    raw_answer=answer,
-                    display_output=display_output,
-                )
-            except RuntimeError as exc:
-                print(f"Error: {exc}", file=sys.stderr)
-
-        print()
-        print(display_output)
 
 
 if __name__ == "__main__":
