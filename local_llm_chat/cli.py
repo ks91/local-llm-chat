@@ -13,6 +13,7 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
+from . import __version__
 from .chat import (
     ChatSession,
     DEFAULT_MAX_TOKENS,
@@ -40,6 +41,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Chat with a local OpenAI-compatible completion server."
     )
+    parser.add_argument("--version", action="version", version=f"local-llm-chat {__version__}")
     parser.add_argument("--port", type=int, default=8080)
     parser.add_argument("--base-url")
     parser.add_argument("--instructions", default="instructions.md")

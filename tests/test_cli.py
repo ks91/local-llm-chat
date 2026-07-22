@@ -1,8 +1,13 @@
+import contextlib
+import io
 import json
+import subprocess
+import sys
 import unittest
 import tempfile
 from pathlib import Path
 
+from local_llm_chat import __version__
 from local_llm_chat.cli import (
     append_output_log,
     build_pdf_multimodal_user_text,
@@ -77,6 +82,28 @@ class CliTests(unittest.TestCase):
 
         self.assertTrue(args.line_editing)
         self.assertTrue(args.show_emoji)
+
+    def test_parser_prints_version(self):
+        stdout = io.StringIO()
+
+        with contextlib.redirect_stdout(stdout):
+            with self.assertRaises(SystemExit) as cm:
+                build_parser().parse_args(["--version"])
+
+        self.assertEqual(cm.exception.code, 0)
+        self.assertEqual(stdout.getvalue(), f"local-llm-chat {__version__}\n")
+
+    def test_module_prints_version(self):
+        result = subprocess.run(
+            [sys.executable, "-m", "local_llm_chat", "--version"],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, f"local-llm-chat {__version__}\n")
 
     def test_parser_can_disable_line_editing_and_emoji(self):
         args = build_parser().parse_args(["--no-line-editing", "--no-show-emoji"])

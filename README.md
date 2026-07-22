@@ -25,8 +25,8 @@ scripts/install.sh
 
 The install script creates `.venv` in this repository and installs
 `prompt_toolkit` and `pypdf` there. It also installs Homebrew `poppler` when
-`pdftotext` or `pdftoppm` is not already available. It does not modify the Homebrew/system
-Python environment.
+`pdftotext` or `pdftoppm` is not already available. It does not modify the
+Homebrew/system Python environment.
 
 ## Start the model server
 
@@ -75,6 +75,12 @@ You can still run the module directly:
 
 ```sh
 python3 -m local_llm_chat
+```
+
+Show the client version:
+
+```sh
+python3 -m local_llm_chat --version
 ```
 
 ## Read a PDF
