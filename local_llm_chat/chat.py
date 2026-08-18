@@ -177,6 +177,7 @@ def format_assistant_output(
     width: int | None = None,
     show_thinking: bool = False,
     show_emoji: bool = False,
+    include_label: bool = True,
 ) -> str:
     display_text = text
     if not show_thinking:
@@ -189,7 +190,9 @@ def format_assistant_output(
     display_text = sanitize_terminal_text(display_text)
     display_text = make_terminal_unicode_safe(display_text, allow_non_bmp=show_emoji)
     display_text = wrap_terminal_text(display_text, width=width)
-    return f"LLM>\n{display_text}"
+    if include_label:
+        return f"LLM>\n{display_text}"
+    return display_text
 
 
 class OpenAICompletionClient:

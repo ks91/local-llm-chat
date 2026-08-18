@@ -407,11 +407,13 @@ def display_and_log_answer(
     show_thinking: bool,
     show_emoji: bool,
     log_output: Path | None,
+    include_label: bool = True,
 ) -> None:
     display_output = format_assistant_output(
         answer,
         show_thinking=show_thinking,
         show_emoji=show_emoji,
+        include_label=include_label,
     )
     if log_output:
         try:
@@ -486,6 +488,7 @@ def main(argv: list[str] | None = None) -> int:
             show_thinking=args.show_thinking,
             show_emoji=args.show_emoji,
             log_output=args.log_output,
+            include_label=False,
         )
         return 0
 

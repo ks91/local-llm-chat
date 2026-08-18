@@ -144,6 +144,12 @@ class ChatSessionTests(unittest.TestCase):
             "LLM>\nfirst\nsecond\nthird",
         )
 
+    def test_format_assistant_output_can_omit_label(self):
+        self.assertEqual(
+            format_assistant_output("first\nsecond", include_label=False),
+            "first\nsecond",
+        )
+
     def test_strip_thinking_removes_standard_think_block(self):
         self.assertEqual(
             strip_thinking("<think>\nprivate\n</think>\nanswer"),
