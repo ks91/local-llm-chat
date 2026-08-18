@@ -83,44 +83,7 @@ Show the client version:
 python3 -m local_llm_chat --version
 ```
 
-## Read a PDF
-
-Pass a PDF path to read it once and exit:
-
-```sh
-scripts/run.sh paper.pdf
-```
-
-The client extracts text with `pdftotext -layout` when available, falling back
-to `pypdf` otherwise. `pdftotext` is usually more reliable for Japanese PDFs.
-The extracted text is sent as a single user message with the configured
-instructions, the answer is printed, and the process exits.
-
-Use a custom instruction file:
-
-```sh
-scripts/run.sh --instructions summarize.md paper.pdf
-```
-
-For a multimodal model served by `llama-server`, also send rendered page images:
-
-```sh
-scripts/run.sh --pdf-images --instructions summarize.md paper.pdf
-```
-
-With `--pdf-images`, the client still extracts text first, then renders pages
-with `pdftoppm` and sends both the extracted text and PNG page images through
-`/v1/chat/completions`. This helps with scanned PDFs, tables, figures, or PDFs
-whose text extraction is unreliable. The default image render limit is the first
-8 pages at 144 DPI:
-
-```sh
-scripts/run.sh --pdf-images --pdf-image-max-pages 12 --pdf-image-dpi 120 paper.pdf
-```
-
-`--pdf-images` requires a vision-capable model and a server that accepts
-OpenAI-style `image_url` content. `scripts/install.sh` installs Homebrew
-`poppler` when needed, which provides both `pdftotext` and `pdftoppm`.
+## Interactive Chat
 
 You will see a prompt like this:
 
@@ -201,6 +164,46 @@ corresponding emoji for display.
 User input is also sanitized before it is added to the in-memory conversation
 history, so pasted terminal control sequences are not sent back to the model in
 later prompts.
+
+## Read a PDF
+
+Pass a PDF path to read it once and exit:
+
+```sh
+scripts/run.sh paper.pdf
+```
+
+The client extracts text with `pdftotext -layout` when available, falling back
+to `pypdf` otherwise. `pdftotext` is usually more reliable for Japanese PDFs.
+The extracted text is sent as a single user message with the configured
+instructions, the answer is printed without the interactive `LLM>` label, and
+the process exits.
+
+Use a custom instruction file:
+
+```sh
+scripts/run.sh --instructions summarize.md paper.pdf
+```
+
+For a multimodal model served by `llama-server`, also send rendered page images:
+
+```sh
+scripts/run.sh --pdf-images --instructions summarize.md paper.pdf
+```
+
+With `--pdf-images`, the client still extracts text first, then renders pages
+with `pdftoppm` and sends both the extracted text and PNG page images through
+`/v1/chat/completions`. This helps with scanned PDFs, tables, figures, or PDFs
+whose text extraction is unreliable. The default image render limit is the first
+8 pages at 144 DPI:
+
+```sh
+scripts/run.sh --pdf-images --pdf-image-max-pages 12 --pdf-image-dpi 120 paper.pdf
+```
+
+`--pdf-images` requires a vision-capable model and a server that accepts
+OpenAI-style `image_url` content. `scripts/install.sh` installs Homebrew
+`poppler` when needed, which provides both `pdftotext` and `pdftoppm`.
 
 ## Initial Instructions
 
