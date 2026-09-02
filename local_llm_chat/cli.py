@@ -35,6 +35,8 @@ _PDFTOTEXT_AUTO = object()
 _PDFTOPPM_AUTO = object()
 DEFAULT_PDF_IMAGE_DPI = 144
 DEFAULT_PDF_IMAGE_MAX_PAGES = 8
+DEFAULT_BATCH_PDF_DIR = Path("inputs")
+DEFAULT_BATCH_OUTPUT_DIR = Path("outputs")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -90,6 +92,25 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "maximum number of PDF pages to render for --pdf-images "
             f"(default: {DEFAULT_PDF_IMAGE_MAX_PAGES})"
+        ),
+    )
+    parser.add_argument(
+        "--batch-pdf-dir",
+        nargs="?",
+        const=DEFAULT_BATCH_PDF_DIR,
+        type=Path,
+        help=(
+            "process every PDF in a directory once and write Markdown files "
+            f"(default input directory: {DEFAULT_BATCH_PDF_DIR})"
+        ),
+    )
+    parser.add_argument(
+        "--batch-output-dir",
+        type=Path,
+        default=DEFAULT_BATCH_OUTPUT_DIR,
+        help=(
+            "output directory for --batch-pdf-dir Markdown files "
+            f"(default: {DEFAULT_BATCH_OUTPUT_DIR})"
         ),
     )
     parser.add_argument(
@@ -303,6 +324,150 @@ def build_pdf_multimodal_user_text(path: Path, text: str) -> str:
     )
 
 
+def discover_pdf_files(input_dir: Path) -> list[Path]:
+    if not input_dir.exists():
+        raise RuntimeError(f"PDF input directory does not exist: {input_dir}")
+    if not input_dir.is_dir():
+        raise RuntimeError(f"PDF input path is not a directory: {input_dir}")
+    return sorted(
+        (
+            path
+            for path in input_dir.iterdir()
+            if path.is_file() and path.suffix.lower() == ".pdf"
+        ),
+        key=lambda path: path.name.lower(),
+    )
+
+
+def output_markdown_path(pdf_path: Path, output_dir: Path) -> Path:
+    return output_dir / f"{pdf_path.stem}.md"
+
+
+def ask_about_pdf(
+    *,
+    path: Path,
+    instructions: str,
+    client: OpenAICompletionClient,
+    session: ChatSession,
+    pdf_images: bool,
+    pdf_image_dpi: int,
+    pdf_image_max_pages: int,
+    max_tokens: int,
+    max_continuations: int,
+    temperature: float,
+    show_thinking: bool,
+) -> tuple[str, str]:
+    if pdf_images:
+        try:
+            pdf_text = read_pdf_text(path)
+        except RuntimeError:
+            pdf_text = ""
+        image_urls = render_pdf_pages_to_image_urls(
+            path,
+            dpi=pdf_image_dpi,
+            max_pages=pdf_image_max_pages,
+        )
+        user_text = build_pdf_multimodal_user_text(path, pdf_text)
+        answer = ""
+        finish_reason: str | None = "length"
+        continuations = 0
+        while finish_reason == "length" and continuations <= max_continuations:
+            result = client.chat_complete_with_images(
+                text=user_text,
+                image_urls=image_urls,
+                instructions=instructions,
+                previous_answer=answer,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                show_thinking=show_thinking,
+            )
+            answer += result["text"] or ""
+            finish_reason = result["finish_reason"]
+            continuations += 1
+        return user_text, answer
+
+    user_text = build_pdf_user_text(path, read_pdf_text(path))
+    return user_text, session.ask(user_text)
+
+
+def write_markdown_output(
+    path: Path,
+    answer: str,
+    *,
+    show_thinking: bool,
+    show_emoji: bool,
+) -> None:
+    output = format_assistant_output(
+        answer,
+        show_thinking=show_thinking,
+        show_emoji=show_emoji,
+        include_label=False,
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(output.rstrip() + "\n", encoding="utf-8")
+
+
+def process_pdf_batch(
+    *,
+    input_dir: Path,
+    output_dir: Path,
+    instructions: str,
+    client: OpenAICompletionClient,
+    pdf_images: bool,
+    pdf_image_dpi: int,
+    pdf_image_max_pages: int,
+    max_tokens: int,
+    max_continuations: int,
+    temperature: float,
+    show_thinking: bool,
+    show_emoji: bool,
+    print_func=print,
+) -> int:
+    pdf_paths = discover_pdf_files(input_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    if not pdf_paths:
+        print_func(f"No PDF files found in {input_dir}.")
+        return 0
+
+    failures = 0
+    for pdf_path in pdf_paths:
+        markdown_path = output_markdown_path(pdf_path, output_dir)
+        print_func(f"Processing {pdf_path} -> {markdown_path}")
+        pdf_session = ChatSession(
+            instructions=instructions,
+            client=client,
+            max_tokens=max_tokens,
+            max_continuations=max_continuations,
+            temperature=temperature,
+            show_thinking=show_thinking,
+        )
+        try:
+            _, answer = ask_about_pdf(
+                path=pdf_path,
+                instructions=instructions,
+                client=client,
+                session=pdf_session,
+                pdf_images=pdf_images,
+                pdf_image_dpi=pdf_image_dpi,
+                pdf_image_max_pages=pdf_image_max_pages,
+                max_tokens=max_tokens,
+                max_continuations=max_continuations,
+                temperature=temperature,
+                show_thinking=show_thinking,
+            )
+            write_markdown_output(
+                markdown_path,
+                answer,
+                show_thinking=show_thinking,
+                show_emoji=show_emoji,
+            )
+        except RuntimeError as exc:
+            failures += 1
+            print_func(f"Error processing {pdf_path}: {exc}")
+
+    return 1 if failures else 0
+
+
 def _pdf_image_sort_key(path: Path) -> tuple[int, str]:
     match = re.search(r"-(\d+)\.png\Z", path.name)
     if match:
@@ -431,7 +596,10 @@ def display_and_log_answer(
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if args.batch_pdf_dir is not None and args.pdf is not None:
+        parser.error("pdf positional argument cannot be used with --batch-pdf-dir")
     instructions = load_instructions(Path(args.instructions))
     base_url = resolve_base_url(port=args.port, base_url=args.base_url)
     client = OpenAICompletionClient(base_url, model=args.model, timeout=args.timeout)
@@ -444,41 +612,37 @@ def main(argv: list[str] | None = None) -> int:
         show_thinking=args.show_thinking,
     )
 
+    if args.batch_pdf_dir is not None:
+        return process_pdf_batch(
+            input_dir=args.batch_pdf_dir,
+            output_dir=args.batch_output_dir,
+            instructions=instructions,
+            client=client,
+            pdf_images=args.pdf_images,
+            pdf_image_dpi=args.pdf_image_dpi,
+            pdf_image_max_pages=args.pdf_image_max_pages,
+            max_tokens=args.max_tokens,
+            max_continuations=args.max_continuations,
+            temperature=args.temperature,
+            show_thinking=args.show_thinking,
+            show_emoji=args.show_emoji,
+        )
+
     if args.pdf:
         try:
-            if args.pdf_images:
-                try:
-                    pdf_text = read_pdf_text(args.pdf)
-                except RuntimeError:
-                    pdf_text = ""
-                image_urls = render_pdf_pages_to_image_urls(
-                    args.pdf,
-                    dpi=args.pdf_image_dpi,
-                    max_pages=args.pdf_image_max_pages,
-                )
-                user_text = build_pdf_multimodal_user_text(args.pdf, pdf_text)
-                answer = ""
-                finish_reason: str | None = "length"
-                continuations = 0
-                while (
-                    finish_reason == "length"
-                    and continuations <= args.max_continuations
-                ):
-                    result = client.chat_complete_with_images(
-                        text=user_text,
-                        image_urls=image_urls,
-                        instructions=instructions,
-                        previous_answer=answer,
-                        max_tokens=args.max_tokens,
-                        temperature=args.temperature,
-                        show_thinking=args.show_thinking,
-                    )
-                    answer += result["text"] or ""
-                    finish_reason = result["finish_reason"]
-                    continuations += 1
-            else:
-                user_text = build_pdf_user_text(args.pdf, read_pdf_text(args.pdf))
-                answer = session.ask(user_text)
+            user_text, answer = ask_about_pdf(
+                path=args.pdf,
+                instructions=instructions,
+                client=client,
+                session=session,
+                pdf_images=args.pdf_images,
+                pdf_image_dpi=args.pdf_image_dpi,
+                pdf_image_max_pages=args.pdf_image_max_pages,
+                max_tokens=args.max_tokens,
+                max_continuations=args.max_continuations,
+                temperature=args.temperature,
+                show_thinking=args.show_thinking,
+            )
         except RuntimeError as exc:
             print(f"Error: {exc}", file=sys.stderr)
             return 1

@@ -6,6 +6,7 @@ import sys
 import unittest
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 from local_llm_chat import __version__
 from local_llm_chat.cli import (
@@ -15,14 +16,18 @@ from local_llm_chat.cli import (
     build_parser,
     configure_input,
     configure_line_editing,
+    discover_pdf_files,
     extract_pdf_text_with_pdftotext,
     is_file_command,
     is_paste_command,
+    output_markdown_path,
+    process_pdf_batch,
     read_message_file,
     read_pdf_text,
     read_paste_input,
     render_pdf_pages_to_image_urls,
     resolve_base_url,
+    write_markdown_output,
 )
 
 
@@ -74,6 +79,22 @@ class FakeCompletedProcess:
         self.stdout = stdout
         self.stderr = stderr
         self.returncode = returncode
+
+
+class FakeBatchClient:
+    def __init__(self):
+        self.calls = []
+
+    def complete_with_metadata(self, prompt, *, max_tokens, temperature, stop):
+        self.calls.append(
+            {
+                "prompt": prompt,
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+                "stop": stop,
+            }
+        )
+        return {"text": f"answer {len(self.calls)}", "finish_reason": "stop"}
 
 
 class CliTests(unittest.TestCase):
@@ -144,6 +165,20 @@ class CliTests(unittest.TestCase):
         self.assertTrue(args.pdf_images)
         self.assertEqual(args.pdf_image_dpi, 96)
         self.assertEqual(args.pdf_image_max_pages, 3)
+
+    def test_parser_can_enable_pdf_batch_with_default_dirs(self):
+        args = build_parser().parse_args(["--batch-pdf-dir"])
+
+        self.assertEqual(args.batch_pdf_dir, Path("inputs"))
+        self.assertEqual(args.batch_output_dir, Path("outputs"))
+
+    def test_parser_accepts_pdf_batch_dirs(self):
+        args = build_parser().parse_args(
+            ["--batch-pdf-dir", "inbox", "--batch-output-dir", "results"]
+        )
+
+        self.assertEqual(args.batch_pdf_dir, Path("inbox"))
+        self.assertEqual(args.batch_output_dir, Path("results"))
 
     def test_default_base_url_uses_port_8080(self):
         self.assertEqual(resolve_base_url(port=8080, base_url=None), "http://127.0.0.1:8080")
@@ -465,6 +500,135 @@ class CliTests(unittest.TestCase):
                     max_pages=0,
                     pdftoppm_command="pdftoppm",
                 )
+
+    def test_discover_pdf_files_returns_sorted_top_level_pdfs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "b.PDF").write_bytes(b"%PDF-1.4\n")
+            (root / "a.pdf").write_bytes(b"%PDF-1.4\n")
+            (root / "note.txt").write_text("skip", encoding="utf-8")
+            (root / "nested").mkdir()
+            (root / "nested" / "c.pdf").write_bytes(b"%PDF-1.4\n")
+
+            self.assertEqual(
+                [path.name for path in discover_pdf_files(root)],
+                ["a.pdf", "b.PDF"],
+            )
+
+    def test_discover_pdf_files_rejects_missing_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(RuntimeError, "does not exist"):
+                discover_pdf_files(Path(tmp) / "missing")
+
+    def test_output_markdown_path_uses_pdf_stem(self):
+        self.assertEqual(
+            output_markdown_path(Path("inbox/paper.pdf"), Path("out")),
+            Path("out/paper.md"),
+        )
+
+    def test_write_markdown_output_omits_label(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "nested" / "answer.md"
+
+            write_markdown_output(
+                path,
+                "answer\n",
+                show_thinking=False,
+                show_emoji=True,
+            )
+
+            self.assertEqual(path.read_text(encoding="utf-8"), "answer\n")
+
+    def test_process_pdf_batch_writes_markdown_for_each_pdf(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            input_dir = root / "input"
+            output_dir = root / "output"
+            input_dir.mkdir()
+            first = input_dir / "first.pdf"
+            second = input_dir / "second.pdf"
+            first.write_bytes(b"%PDF-1.4\n")
+            second.write_bytes(b"%PDF-1.4\n")
+            messages = []
+            client = FakeBatchClient()
+
+            with patch(
+                "local_llm_chat.cli.read_pdf_text",
+                side_effect=lambda path: f"text from {path.name}",
+            ):
+                status = process_pdf_batch(
+                    input_dir=input_dir,
+                    output_dir=output_dir,
+                    instructions="Summarize.",
+                    client=client,
+                    pdf_images=False,
+                    pdf_image_dpi=144,
+                    pdf_image_max_pages=8,
+                    max_tokens=32,
+                    max_continuations=0,
+                    temperature=0.1,
+                    show_thinking=False,
+                    show_emoji=True,
+                    print_func=messages.append,
+                )
+
+            self.assertEqual(status, 0)
+            self.assertEqual(
+                (output_dir / "first.md").read_text(encoding="utf-8"),
+                "answer 1\n",
+            )
+            self.assertEqual(
+                (output_dir / "second.md").read_text(encoding="utf-8"),
+                "answer 2\n",
+            )
+            self.assertEqual(len(client.calls), 2)
+            self.assertIn("first.pdf", client.calls[0]["prompt"])
+            self.assertIn("second.pdf", client.calls[1]["prompt"])
+            self.assertEqual(len(messages), 2)
+
+    def test_process_pdf_batch_reports_failures_and_continues(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            input_dir = root / "input"
+            output_dir = root / "output"
+            input_dir.mkdir()
+            (input_dir / "first.pdf").write_bytes(b"%PDF-1.4\n")
+            (input_dir / "second.pdf").write_bytes(b"%PDF-1.4\n")
+            messages = []
+            client = FakeBatchClient()
+
+            def fake_read_pdf_text(path):
+                if path.name == "first.pdf":
+                    raise RuntimeError("bad pdf")
+                return "ok"
+
+            with patch(
+                "local_llm_chat.cli.read_pdf_text",
+                side_effect=fake_read_pdf_text,
+            ):
+                status = process_pdf_batch(
+                    input_dir=input_dir,
+                    output_dir=output_dir,
+                    instructions="Summarize.",
+                    client=client,
+                    pdf_images=False,
+                    pdf_image_dpi=144,
+                    pdf_image_max_pages=8,
+                    max_tokens=32,
+                    max_continuations=0,
+                    temperature=0.1,
+                    show_thinking=False,
+                    show_emoji=True,
+                    print_func=messages.append,
+                )
+
+            self.assertEqual(status, 1)
+            self.assertFalse((output_dir / "first.md").exists())
+            self.assertEqual(
+                (output_dir / "second.md").read_text(encoding="utf-8"),
+                "answer 1\n",
+            )
+            self.assertTrue(any("Error processing" in message for message in messages))
 
     def test_append_output_log_writes_json_line(self):
         with tempfile.TemporaryDirectory() as tmp:

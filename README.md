@@ -205,6 +205,36 @@ scripts/run.sh --pdf-images --pdf-image-max-pages 12 --pdf-image-dpi 120 paper.p
 OpenAI-style `image_url` content. `scripts/install.sh` installs Homebrew
 `poppler` when needed, which provides both `pdftotext` and `pdftoppm`.
 
+## Batch PDF Processing
+
+Process every top-level PDF file in a directory and write one Markdown file per
+PDF:
+
+```sh
+scripts/run.sh --batch-pdf-dir input-pdfs --batch-output-dir outputs \
+  --instructions summarize.md
+```
+
+If `--batch-pdf-dir` is provided without a value, `inputs/` is used. The
+default output directory is `outputs/`:
+
+```sh
+scripts/run.sh --batch-pdf-dir --instructions summarize.md
+```
+
+For each `name.pdf`, the client writes `outputs/name.md`. Existing output files
+with the same name are overwritten. Each PDF is processed independently with
+the configured instructions; chat context is not carried from one PDF to the
+next. If one PDF fails, the batch continues and exits with status `1` after the
+remaining files have been attempted.
+
+Batch processing can also use rendered PDF page images:
+
+```sh
+scripts/run.sh --batch-pdf-dir input-pdfs --batch-output-dir outputs \
+  --pdf-images --instructions summarize.md
+```
+
 ## Initial Instructions
 
 At startup, the client reads `instructions.md` from the current directory. Edit
@@ -257,7 +287,9 @@ python3 -m local_llm_chat \
   --show-thinking \
   --show-emoji \
   --no-show-emoji \
-  --log-output output.jsonl
+  --log-output output.jsonl \
+  --batch-pdf-dir input-pdfs \
+  --batch-output-dir outputs
 ```
 
 Options:
@@ -276,6 +308,11 @@ Options:
   `\U00000000`-style emoji escapes such as `\U0001f9e9`. Default: on
 - `--log-output`: append raw and display-ready assistant output to a UTF-8 JSON
   Lines file for terminal crash debugging. Default: off
+- `--batch-pdf-dir`: process every top-level PDF file in a directory and write
+  Markdown outputs. If the option is present without a value, the input
+  directory is `inputs`. Default: off
+- `--batch-output-dir`: output directory for batch Markdown files. Default:
+  `outputs`
 
 ## Thinking Tags
 
